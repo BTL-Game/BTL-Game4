@@ -9,11 +9,16 @@ from .actions import (
     ChooseDirection,
     ChooseTarget,
     DrawCard,
+    KickPlayer,
     LeaveRoom,
     PlayCard,
     Reaction,
     StartMatch,
 )
+
+
+TURN_SKIP_AFTER_SECONDS = 30.0
+REMOVE_AFTER_TOTAL_SECONDS = 60.0
 from .cards import Card, CardType, Color
 from .events import EventBus
 from .game_state import GameState
@@ -35,16 +40,115 @@ class GameEngine:
     def create_room(self, host_id: str, host_name: str) -> None:
         self.state = GameState()
         self.state.room_code = "".join(random.choice(string.ascii_uppercase) for _ in range(4))
-        self.state.players = [Player(player_id=host_id, name=host_name, is_host=True)]
+        self.state.players = [
+            Player(player_id=host_id, name=host_name, is_host=True, joined_at=time.monotonic())
+        ]
         self.state.hands[host_id] = []
 
     def join_room(self, player_id: str, name: str) -> bool:
         if self.state.started or len(self.state.players) >= 4:
             return False
-        self.state.players.append(Player(player_id=player_id, name=name, is_host=False))
+        self.state.players.append(
+            Player(player_id=player_id, name=name, is_host=False, joined_at=time.monotonic())
+        )
         self.state.hands[player_id] = []
         self._push_log(f"{name} joined room.")
         return True
+
+    def _find_player(self, player_id: str) -> Player | None:
+        for p in self.state.players:
+            if p.player_id == player_id:
+                return p
+        return None
+
+    def mark_disconnected(self, player_id: str) -> None:
+        p = self._find_player(player_id)
+        if p is None or not p.connected:
+            return
+        p.connected = False
+        p.disconnected_at = time.monotonic()
+        self._push_log(f"{p.name} disconnected.")
+
+    def mark_reconnected(self, player_id: str) -> None:
+        p = self._find_player(player_id)
+        if p is None or p.connected:
+            return
+        if p.disconnected_at is not None:
+            p.total_disconnect_seconds += time.monotonic() - p.disconnected_at
+        p.connected = True
+        p.disconnected_at = None
+        self._push_log(f"{p.name} reconnected.")
+
+    def _current_disconnect_duration(self, p: Player) -> float:
+        if p.connected or p.disconnected_at is None:
+            return 0.0
+        return time.monotonic() - p.disconnected_at
+
+    def _cumulative_disconnect(self, p: Player) -> float:
+        return p.total_disconnect_seconds + self._current_disconnect_duration(p)
+
+    def _remove_player(self, player_id: str, reason: str) -> None:
+        p = self._find_player(player_id)
+        if p is None:
+            return
+        was_host = p.is_host
+        was_current_turn = self.state.current_player_id() == player_id
+        idx = self.state.players.index(p)
+        self.state.players.pop(idx)
+        self.state.hands.pop(player_id, None)
+        if self.state.awaiting_color_for_player == player_id:
+            self.state.awaiting_color_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.awaiting_direction_for_player == player_id:
+            self.state.awaiting_direction_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.awaiting_target_for_player == player_id:
+            self.state.awaiting_target_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.may_play_drawn_for_player == player_id:
+            self.state.may_play_drawn_for_player = None
+        if self.state.players:
+            if idx <= self.state.turn_index and self.state.turn_index > 0:
+                self.state.turn_index -= 1
+            self.state.turn_index %= len(self.state.players)
+        else:
+            self.state.turn_index = 0
+        self._push_log(f"{p.name} removed ({reason}).")
+        if self.state.started and not self.state.ended:
+            if len(self.state.players) == 1:
+                self.state.ended = True
+                self.state.winner_id = self.state.players[0].player_id
+                self._push_log(f"{self.state.players[0].name} wins by walkover!")
+                return
+            if len(self.state.players) == 0:
+                self.state.ended = True
+                return
+            if was_current_turn:
+                # turn_index now points at next player automatically after pop
+                pass
+        if was_host:
+            self._promote_new_host()
+
+    def _promote_new_host(self) -> None:
+        survivors = [p for p in self.state.players if p.connected]
+        pool = survivors if survivors else list(self.state.players)
+        if not pool:
+            return
+        new_host = min(pool, key=lambda p: p.joined_at)
+        for p in self.state.players:
+            p.is_host = (p.player_id == new_host.player_id)
+        self._push_log(f"{new_host.name} is now the host.")
+
+    def kick_player(self, requester_id: str, target_id: str) -> tuple[bool, str]:
+        requester = self._find_player(requester_id)
+        if requester is None or not requester.is_host:
+            return False, "Only host can kick"
+        if requester_id == target_id:
+            return False, "Cannot kick yourself"
+        if self._find_player(target_id) is None:
+            return False, "Target not in room"
+        self._remove_player(target_id, reason="kicked")
+        return True, ""
 
     def _draw_card_or_rebuild(self) -> Card | None:
         card = self.state.draw_pile.draw()
@@ -97,6 +201,8 @@ class GameEngine:
             return (self.start_match(), "")
         if isinstance(action, LeaveRoom):
             return self._handle_leave(player_id)
+        if isinstance(action, KickPlayer):
+            return self.kick_player(player_id, action.target_player_id)
         if not self.state.started or self.state.ended:
             return False, "Match has not started or already ended"
         if isinstance(action, Reaction):
@@ -118,10 +224,11 @@ class GameEngine:
         return False, "Unknown action"
 
     def _handle_leave(self, player_id: str) -> tuple[bool, str]:
-        if self.state.started:
-            return False, "Cannot leave after match start in this MVP"
-        self.state.players = [p for p in self.state.players if p.player_id != player_id]
-        self.state.hands.pop(player_id, None)
+        if not self.state.started:
+            self.state.players = [p for p in self.state.players if p.player_id != player_id]
+            self.state.hands.pop(player_id, None)
+            return True, ""
+        self._remove_player(player_id, reason="left match")
         return True, ""
 
     def _handle_reaction(self, player_id: str) -> tuple[bool, str]:
@@ -304,3 +411,60 @@ class GameEngine:
     def tick(self) -> None:
         if self.state.reaction_event.active and self.state.reaction_event.deadline_passed():
             self._resolve_reaction_final()
+        # Cumulative disconnect → remove (works in lobby and in match).
+        for p in list(self.state.players):
+            if not p.connected and self._cumulative_disconnect(p) >= REMOVE_AFTER_TOTAL_SECONDS:
+                self._remove_player(p.player_id, reason="disconnect timeout")
+        if not self.state.started or self.state.ended or not self.state.players:
+            return
+        # If the player who owes a decision is disconnected long enough, auto-pass.
+        guard = 0
+        while guard < len(self.state.players) + 1:
+            guard += 1
+            cur_id = self.state.current_player_id()
+            cur = self._find_player(cur_id) if cur_id else None
+            if cur is None:
+                break
+            owes = (
+                self.state.awaiting_color_for_player == cur_id
+                or self.state.awaiting_direction_for_player == cur_id
+                or self.state.awaiting_target_for_player == cur_id
+                or self.state.may_play_drawn_for_player == cur_id
+            )
+            it_is_their_turn = owes or self.state.current_player_id() == cur_id
+            if not it_is_their_turn:
+                break
+            if cur.connected:
+                break
+            if self._current_disconnect_duration(cur) < TURN_SKIP_AFTER_SECONDS:
+                break
+            # Auto-skip this turn.
+            self._auto_skip_turn(cur)
+            if self.state.ended:
+                break
+
+    def _auto_skip_turn(self, p: Player) -> None:
+        # Clear any pending decisions belonging to this player; treat as a forfeit
+        # of this round only (their hand is preserved).
+        if self.state.awaiting_color_for_player == p.player_id:
+            # Default to current_color (no change).
+            self.state.awaiting_color_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.awaiting_direction_for_player == p.player_id:
+            self.state.awaiting_direction_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.awaiting_target_for_player == p.player_id:
+            self.state.awaiting_target_for_player = None
+            self.state.awaiting_played_card = None
+        if self.state.may_play_drawn_for_player == p.player_id:
+            self.state.may_play_drawn_for_player = None
+        # If a draw penalty is pending, the disconnected player eats it on skip.
+        if self.state.pending_penalty > 0:
+            for _ in range(self.state.pending_penalty):
+                c = self._draw_card_or_rebuild()
+                if c is not None:
+                    self.state.hands[p.player_id].append(c)
+            self.state.pending_penalty = 0
+            self.state.pending_penalty_min = 0
+        self._push_log(f"{p.name} missed turn (disconnected).")
+        self.state.next_turn()

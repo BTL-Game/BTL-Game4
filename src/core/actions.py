@@ -43,3 +43,8 @@ class ChooseTarget:
 @dataclass(frozen=True)
 class Reaction:
     pass
+
+
+@dataclass(frozen=True)
+class KickPlayer:
+    target_player_id: str

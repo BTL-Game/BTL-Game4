@@ -1,112 +1,199 @@
 from __future__ import annotations
 
+import time
+
 import pygame
 
-from src.network.local import LocalNetwork
+from src.network.socket_client import SocketClientNetwork
 from src.ui.assets import AssetManager
 from src.ui.scene import AppContext
 from src.ui.scene_manager import SceneManager
 from src.ui.scenes.end_game import EndGameScene
 from src.ui.scenes.game import GameScene
 from src.ui.scenes.lobby import LobbyScene
+from src.ui.scenes.lobby_browser import LobbyBrowserScene
 from src.ui.scenes.menu import MenuScene
 from src.ui.theme import SCREEN_H, SCREEN_W
 
 
-def run_app() -> None:
+_TOAST_FONT = None
+
+
+def _draw_toasts(screen: pygame.Surface, ctx: AppContext) -> None:
+    global _TOAST_FONT
+    if not ctx.toasts:
+        return
+    if _TOAST_FONT is None:
+        _TOAST_FONT = pygame.font.SysFont("arial", 16, bold=True)
+    pad = 8
+    margin = 12
+    y = margin
+    sw = screen.get_width()
+    for text, _exp in ctx.toasts[-6:]:
+        surf = _TOAST_FONT.render(text, True, (255, 240, 220))
+        bg = pygame.Surface((surf.get_width() + 2 * pad, surf.get_height() + 2 * pad), pygame.SRCALPHA)
+        bg.fill((20, 20, 20, 200))
+        x = sw - bg.get_width() - margin
+        screen.blit(bg, (x, y))
+        screen.blit(surf, (x + pad, y + pad))
+        y += bg.get_height() + 4
+
+
+def _format_event(ev: dict) -> str:
+    kind = ev.get("kind", "?")
+    name = ev.get("player_name", "")
+    if kind == "JOIN":
+        return f"{name} joined."
+    if kind == "LEAVE":
+        return f"{name} left."
+    if kind == "DISCONNECT":
+        return f"{name} disconnected."
+    if kind == "RECONNECT":
+        return f"{name} reconnected."
+    if kind == "KICK":
+        by = ev.get("by_name", "host")
+        return f"{name} was kicked by {by}."
+    if kind == "REMOVED":
+        reason = ev.get("reason", "")
+        return f"{name} removed ({reason})."
+    if kind == "HOST_MIGRATED":
+        return f"{ev.get('new_host_name', '?')} is now the host."
+    if kind == "REACTION_START":
+        return "⚡ Reaction event!"
+    if kind == "MATCH_START":
+        return "Match started."
+    if kind == "MATCH_END":
+        suffix = " (walkover)" if ev.get("walkover") else ""
+        return f"{ev.get('winner_name','?')} wins{suffix}!"
+    return f"{kind}: {name}"
+
+
+def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
+            initial_name: str = "") -> None:
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
-    pygame.display.set_caption("Custom UNO Online")
+    pygame.display.set_caption(f"Custom UNO Online — {server_host}:{server_port}")
     clock = pygame.time.Clock()
 
-    network = LocalNetwork()
+    network = SocketClientNetwork(server_host, server_port)
+    try:
+        network.connect()
+    except OSError as exc:
+        print(f"[client] cannot connect to {server_host}:{server_port}: {exc}")
+        print("        start the server first with `python -m src.server`.")
+        pygame.quit()
+        return
+
     ctx = AppContext(network=network, assets=AssetManager())
-    ctx.player_name = "Player"
+    ctx.player_name = initial_name
+    ctx.server_address = f"{server_host}:{server_port}"
     ctx.current_view = None
     ctx.views_by_player = {}
-    ctx.seated_player_ids = []  # hot-seat order
+    ctx.toasts = []
 
+    # ------------------------------------------------------------------
+    # navigation callbacks
+    # ------------------------------------------------------------------
     def go_menu() -> None:
-        scene_manager.switch(MenuScene(ctx, go_lobby))
+        ctx.current_view = None
+        ctx.player_id = ""
+        ctx.room_code = ""
+        scene_manager.switch(MenuScene(ctx, go_browser))
 
-    def go_lobby(create: bool) -> None:
+    def go_browser() -> None:
         ctx.error = ""
-        if create:
-            host_id = network.host_room(ctx.player_name or "Host")
-            ctx.player_id = host_id
-            ctx.seated_player_ids = [host_id]
-            # Auto-add 3 dummy seats so single-machine demo works.
-            # Names are just labels; in real LAN play, real clients join instead.
-            for nm in ("Bob", "Charlie", "Dave"):
-                pid = network.join_room(network.engine.state.room_code, nm)
-                if pid:
-                    ctx.seated_player_ids.append(pid)
-            network.update()
-        else:
-            if not network.engine.state.players:
-                host_id = network.host_room("Host")
-                ctx.seated_player_ids = [host_id]
-            pid = network.join_room(network.engine.state.room_code,
-                                    ctx.player_name or "Guest")
-            if not pid:
-                ctx.error = "Join failed (room full or game started)."
-                return
-            ctx.player_id = pid
-            ctx.seated_player_ids.append(pid)
-            network.update()
-        scene_manager.switch(LobbyScene(ctx, go_menu))
+        scene_manager.switch(
+            LobbyBrowserScene(ctx, on_create=do_create, on_join=do_join, on_back=go_menu)
+        )
+
+    def do_create() -> None:
+        ctx.error = ""
+        network.host_room(ctx.player_name or "Player")
+
+    def do_join(code: str) -> None:
+        ctx.error = ""
+        network.join_room(code, ctx.player_name or "Player")
+
+    def go_lobby() -> None:
+        scene_manager.switch(LobbyScene(ctx, leave_lobby))
+
+    def leave_lobby() -> None:
+        # Tell server we're leaving the room (engine handles pre-/post-match).
+        if ctx.player_id:
+            from src.core.actions import LeaveRoom
+            network.send(ctx.player_id, LeaveRoom())
+        network.player_id = ""
+        network.room_code = ""
+        network.is_host = False
+        go_browser()
 
     def on_state(player_id, view) -> None:
+        # In socket mode there's exactly one local player; just record their view.
         ctx.views_by_player[player_id] = view
-
-    def refresh_view() -> None:
-        # Auto-follow whose turn it is during normal play, or the player who
-        # owes a decision (color / direction / target). Keeps hot-seat usable.
-        view = ctx.views_by_player.get(ctx.player_id)
+        ctx.player_id = player_id
+        ctx.room_code = view.room_code
         ctx.current_view = view
 
     network.on_state(on_state)
-    scene_manager = SceneManager(MenuScene(ctx, go_lobby))
+    scene_manager = SceneManager(MenuScene(ctx, go_browser))
+
     running = True
     while running:
         dt = clock.tick(60) / 1000.0
         network.update()
-        # Hot-seat: auto-switch active seat to whoever the engine is asking
-        # for input from. Manual override via TAB still works.
-        view = ctx.views_by_player.get(ctx.player_id)
-        if view and view.started and not view.ended and not view.reaction_active:
-            who = (view.awaiting_color_for_player
-                   or view.awaiting_direction_for_player
-                   or view.awaiting_target_for_player
-                   or view.turn_player_id)
-            if who and who != ctx.player_id and who in ctx.seated_player_ids:
-                ctx.player_id = who
-        refresh_view()
+
+        # Surface async errors raised by network handlers (rejection / kicked).
+        if network.last_error and not ctx.error:
+            ctx.error = network.last_error
+            network.last_error = ""
+
+        # Drain transient EVENTs from the network and turn them into toasts.
+        now_t = time.monotonic()
+        while True:
+            ev = network.pop_event()
+            if ev is None:
+                break
+            ctx.toasts.append((_format_event(ev), now_t + 4.0))
+        # Expire old toasts.
+        ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]
+
+        # If we just got JOINED, the next STATE will populate the view; transition
+        # into the lobby as soon as we know our player_id.
+        if (
+            network.player_id
+            and ctx.current_view is not None
+            and not isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
+        ):
+            go_lobby()
+
+        # Auto-route on view changes (started/ended).
+        view = ctx.current_view
+        if view is not None and network.player_id:
+            if view.ended and not isinstance(scene_manager.current, EndGameScene):
+                scene_manager.switch(EndGameScene(ctx, leave_lobby))
+            elif view.started and not view.ended and not isinstance(scene_manager.current, GameScene):
+                scene_manager.switch(GameScene(ctx))
+            elif (not view.started) and isinstance(scene_manager.current, GameScene):
+                scene_manager.switch(LobbyScene(ctx, leave_lobby))
+
+        # If we lost our seat (kicked / connection ended), bounce back to browser.
+        if (
+            not network.player_id
+            and isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
+        ):
+            ctx.current_view = None
+            go_browser()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
                 continue
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
-                if ctx.seated_player_ids:
-                    i = ctx.seated_player_ids.index(ctx.player_id) \
-                        if ctx.player_id in ctx.seated_player_ids else -1
-                    ctx.player_id = ctx.seated_player_ids[(i + 1) % len(ctx.seated_player_ids)]
-                    refresh_view()
-                continue
             scene_manager.current.handle_event(event)
 
-        view = ctx.current_view
-        if view is not None:
-            if view.ended and not isinstance(scene_manager.current, EndGameScene):
-                scene_manager.switch(EndGameScene(ctx, go_menu))
-            elif view.started and not view.ended and not isinstance(scene_manager.current, GameScene):
-                scene_manager.switch(GameScene(ctx))
-            elif (not view.started) and not isinstance(
-                scene_manager.current, (MenuScene, LobbyScene)
-            ):
-                scene_manager.switch(LobbyScene(ctx, go_menu))
         scene_manager.current.update(dt)
         scene_manager.current.draw(screen)
+        _draw_toasts(screen, ctx)
         pygame.display.flip()
+
+    network.close()
     pygame.quit()

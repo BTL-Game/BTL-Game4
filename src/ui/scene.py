@@ -17,6 +17,9 @@ class AppContext:
     current_view: Any = None
     views_by_player: Any = None
     seated_player_ids: Any = None
+    server_address: str = ""
+    # toasts: list of (text, expires_at_monotonic)
+    toasts: Any = None
 
 
 class Scene:

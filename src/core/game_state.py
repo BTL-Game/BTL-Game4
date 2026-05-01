@@ -81,6 +81,8 @@ class PublicPlayerView:
     name: str
     is_host: bool
     card_count: int
+    connected: bool = True
+    disconnect_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -110,15 +112,20 @@ class GameStateView:
 
 
 def to_view(state: GameState, self_player_id: str, log: list[str]) -> GameStateView:
-    players = [
-        PublicPlayerView(
-            player_id=p.player_id,
-            name=p.name,
-            is_host=p.is_host,
-            card_count=len(state.hands.get(p.player_id, [])),
+    now = time.monotonic()
+    players = []
+    for p in state.players:
+        cur_dc = 0.0 if p.connected or p.disconnected_at is None else (now - p.disconnected_at)
+        players.append(
+            PublicPlayerView(
+                player_id=p.player_id,
+                name=p.name,
+                is_host=p.is_host,
+                card_count=len(state.hands.get(p.player_id, [])),
+                connected=p.connected,
+                disconnect_seconds=cur_dc,
+            )
         )
-        for p in state.players
-    ]
     return GameStateView(
         self_player_id=self_player_id,
         players=players,

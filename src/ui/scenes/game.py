@@ -209,14 +209,29 @@ class GameScene(Scene):
         y = cy
         for i in range(n):
             back = self.ctx.assets.card_back(mini)
+            if not opp.connected:
+                back = back.copy()
+                back.set_alpha(110)
             screen.blit(back, (x0 + i * spacing, y))
         name_color = ACCENT if is_turn else TEXT
+        if not opp.connected:
+            name_color = (170, 170, 170)
         name = self.font_b.render(f"{opp.name} ({opp.card_count})", True, name_color)
         screen.blit(name, name.get_rect(center=(cx, y - 16)))
-        if is_turn:
+        if is_turn and opp.connected:
             pygame.draw.rect(screen, ACCENT,
                              (x0 - 6, y - 28, total_w + mini[0] + 12, mini[1] + 36),
                              2, border_radius=8)
+        if not opp.connected:
+            remain_total = max(0, int(60 - opp.disconnect_seconds))
+            remain_skip = max(0, int(30 - opp.disconnect_seconds))
+            label = (
+                f"DISCONNECTED  skip in {remain_skip}s"
+                if remain_skip > 0
+                else f"DISCONNECTED  remove in {remain_total}s"
+            )
+            tag = self.font.render(label, True, (255, 160, 120))
+            screen.blit(tag, tag.get_rect(center=(cx, y + mini[1] + 14)))
 
     def _draw_center_piles(self, screen: pygame.Surface, view) -> None:
         cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 10
