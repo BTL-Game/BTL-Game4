@@ -15,6 +15,7 @@ from src.core.actions import (
     ChooseTarget,
     DrawCard,
     KickPlayer,
+    AddBot,
     LeaveRoom,
     PlayCard,
     Reaction,
@@ -144,6 +145,8 @@ def action_to_json(action: object) -> dict[str, Any]:
         return {"action_type": "LeaveRoom"}
     if isinstance(action, KickPlayer):
         return {"action_type": "KickPlayer", "target_player_id": action.target_player_id}
+    if isinstance(action, AddBot):
+        return {"action_type": "AddBot"}
     raise ValueError(f"Unknown action type: {type(action).__name__}")
 
 
@@ -167,4 +170,6 @@ def action_from_json(d: dict[str, Any]) -> object:
         return LeaveRoom()
     if t == "KickPlayer":
         return KickPlayer(target_player_id=str(d["target_player_id"]))
+    if t == "AddBot":
+        return AddBot()
     raise ValueError(f"Unknown action_type: {t!r}")

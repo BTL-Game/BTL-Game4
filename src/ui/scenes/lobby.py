@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pygame
 
-from src.core.actions import KickPlayer, StartMatch
+from src.core.actions import KickPlayer, StartMatch, AddBot
 from src.ui.scene import AppContext, Scene
 from src.ui.theme import ACCENT, BG, BG_DARK, MUTED, PANEL, SCREEN_H, SCREEN_W, TEXT
 from src.ui.widgets import Button
@@ -21,6 +21,7 @@ class LobbyScene(Scene):
         cx = SCREEN_W // 2
         self.start_btn = Button(pygame.Rect(cx - 170, SCREEN_H - 120, 150, 50), "START")
         self.leave_btn = Button(pygame.Rect(cx + 20, SCREEN_H - 120, 150, 50), "LEAVE")
+        self.add_bot_btn = Button(pygame.Rect(cx - 340, SCREEN_H - 120, 150, 50), "ADD BOT")
         self.font = pygame.font.SysFont("arial", 22, bold=True)
         self.small = pygame.font.SysFont("arial", 18)
         self.tiny = pygame.font.SysFont("arial", 14)
@@ -61,6 +62,13 @@ class LobbyScene(Scene):
                     else:
                         self.ctx.error = ""
                     return
+        if is_host and self.add_bot_btn.clicked(event):
+            ok, reason = self.ctx.network.send(self.ctx.player_id, AddBot())
+            if not ok:
+                self.ctx.error = reason or "Add bot failed."
+            else:
+                self.ctx.error = ""
+            return
 
     def draw(self, screen: pygame.Surface) -> None:
         screen.fill(BG)
@@ -111,6 +119,7 @@ class LobbyScene(Scene):
         if is_host:
             for btn in self._kick_buttons.values():
                 btn.draw(screen, self.tiny)
+            self.add_bot_btn.draw(screen, self.font)
 
         # Event log panel (right side).
         log_rect = pygame.Rect(SCREEN_W - 320, 100, 280, SCREEN_H - 260)

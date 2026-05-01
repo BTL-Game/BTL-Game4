@@ -17,8 +17,13 @@ from src.core.game_state import GameStateView
 
 
 class SimpleBot:
-    def choose_action(self, view: GameStateView, my_id: str) -> object:
+    def _think(self, min_seconds: float = 5.0, max_seconds: float = 10.0) -> None:
+        time.sleep(random.uniform(min_seconds, max_seconds))
 
+    def choose_action(self, view: GameStateView, my_id: str, delay: bool = True) -> object:
+        del my_id
+        if delay:
+            self._think()
         if not view.self_hand:
             return DrawCard()
 
@@ -28,7 +33,6 @@ class SimpleBot:
             stacking_idx = self._find_stacking_card(view, playable_indices)
             if stacking_idx is not None:
                 return PlayCard(hand_index=stacking_idx)
-
 
         if len(view.self_hand) == 1 and playable_indices:
             idx = playable_indices[0]
@@ -40,36 +44,34 @@ class SimpleBot:
             number_idx = self._find_best_number_card(view, playable_indices)
             if number_idx is not None:
                 return PlayCard(hand_index=number_idx)
-
             idx = playable_indices[0]
             return PlayCard(hand_index=idx)
 
         return DrawCard()
 
     def _get_playable_indices(self, view: GameStateView) -> list[int]:
-        playable = []
-        
-        if view.top_card is None:
-            return list(range(len(view.self_hand)))
+        return [idx for idx, card in enumerate(view.self_hand) if self._is_legal_play(view, card)]
 
-        for idx, card in enumerate(view.self_hand):
-            if self._can_play(card, view.top_card, view.current_color):
-                playable.append(idx)
+    def _is_legal_play(self, view: GameStateView, card: Card) -> bool:
+        if view.pending_penalty > 0:
+            if view.pending_penalty_min == 4:
+                return card.card_type == CardType.WILD_DRAW_FOUR
+            return card.card_type in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR)
 
-        return playable
-
-    def _can_play(self, card: Card, top_card: Card, current_color: Color | None) -> bool:
-
+        top_card = view.top_card
+        if top_card is None:
+            return True
         if card.card_type == CardType.WILD or card.card_type == CardType.WILD_DRAW_FOUR:
             return True
 
+        current_color = view.current_color or top_card.color
         if top_card.color == Color.WILD:
             return card.color == current_color or card.card_type in (
                 CardType.WILD,
                 CardType.WILD_DRAW_FOUR,
             )
 
-        if card.color == top_card.color:
+        if card.color == current_color:
             return True
 
         if card.card_type == top_card.card_type:
@@ -121,9 +123,12 @@ class SimpleBot:
 
         return number_indices[0]
 
-    def choose_color(self, view: GameStateView, my_id: str) -> ChooseColor:
+    def choose_color(self, view: GameStateView, my_id: str, delay: bool = True) -> ChooseColor:
+        del my_id
+        if delay:
+            self._think()
         color_counts = Counter()
-        
+
         for card in view.self_hand:
             if card.color != Color.WILD:
                 color_counts[card.color] += 1
@@ -135,7 +140,9 @@ class SimpleBot:
         colors = [Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW]
         return ChooseColor(color=random.choice(colors))
 
-    def choose_direction(self, view: GameStateView, my_id: str) -> ChooseDirection:
+    def choose_direction(self, view: GameStateView, my_id: str, delay: bool = True) -> ChooseDirection:
+        if delay:
+            self._think()
         if not view.players:
             return ChooseDirection(direction=1)
         other_players = [p for p in view.players if p.player_id != my_id]
@@ -160,17 +167,19 @@ class SimpleBot:
 
         return ChooseDirection(direction=-1)
 
-    def choose_target(self, view: GameStateView, my_id: str) -> ChooseTarget:
+    def choose_target(self, view: GameStateView, my_id: str, delay: bool = True) -> ChooseTarget:
+        if delay:
+            self._think()
         other_players = [p for p in view.players if p.player_id != my_id]
-        
+
         if not other_players:
             return ChooseTarget(target_player_id=view.players[0].player_id)
 
         min_cards_player = min(other_players, key=lambda p: p.card_count)
         return ChooseTarget(target_player_id=min_cards_player.player_id)
 
-    def reaction(self, view: GameStateView, my_id: str) -> Reaction:
-        delay = random.uniform(0.8, 2.2)
-        time.sleep(delay)
-        
+    def reaction(self, view: GameStateView, my_id: str, delay: bool = True) -> Reaction:
+        del view, my_id
+        if delay:
+            time.sleep(random.uniform(0.8, 2.2))
         return Reaction()

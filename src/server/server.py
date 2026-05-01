@@ -24,10 +24,11 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from src.core.actions import LeaveRoom
+from src.core.actions import LeaveRoom, AddBot, DrawCard
 from src.core.engine import GameEngine
 from src.core.game_state import to_view
 from src.network.codec import action_from_json, view_to_json
+from src.ai.simple_bot import SimpleBot
 
 
 ROOM_GC_AFTER_SEC = 10.0
@@ -77,6 +78,8 @@ class Room:
     code: str
     engine: GameEngine
     connections: dict[str, Connection] = field(default_factory=dict)  # player_id -> conn
+    bots: dict[str, SimpleBot] = field(default_factory=dict)
+    bot_ready_at: dict[tuple[str, str], float] = field(default_factory=dict)
     empty_since: float | None = None
 
     @property
@@ -120,6 +123,18 @@ class Room:
             if conn.closed:
                 continue
             conn.send_envelope("EVENT", payload)
+
+    def clear_bot_timers_for(self, player_id: str) -> None:
+        for key in list(self.bot_ready_at.keys()):
+            if key[0] == player_id:
+                self.bot_ready_at.pop(key, None)
+
+    def bot_delay_for_stage(self, stage: str) -> float:
+        if stage == "action":
+            return random.uniform(5.0, 10.0)
+        if stage == "reaction":
+            return random.uniform(0.8, 2.2)
+        return random.uniform(0.4, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +221,56 @@ class Server:
             before_reaction = room.engine.state.reaction_event.active
             before_ended = room.engine.state.ended
             room.engine.tick()
+
+            cur_id = room.engine.state.current_player_id()
+            if cur_id is not None and cur_id in room.bots and not room.engine.state.ended:
+                if room.engine.state.reaction_event.active:
+                    stage = "reaction"
+                elif room.engine.state.awaiting_color_for_player == cur_id:
+                    stage = "color"
+                elif room.engine.state.awaiting_direction_for_player == cur_id:
+                    stage = "direction"
+                elif room.engine.state.awaiting_target_for_player == cur_id:
+                    stage = "target"
+                else:
+                    stage = "action"
+                ready_key = (cur_id, stage)
+                ready_at = room.bot_ready_at.get(ready_key)
+                if ready_at is None:
+                    room.bot_ready_at[ready_key] = now + room.bot_delay_for_stage(stage)
+                elif now >= ready_at:
+                    bot = room.bots[cur_id]
+                    view = to_view(room.engine.state, cur_id, room.engine.log)
+                    if stage == "reaction":
+                        action = bot.reaction(view, cur_id, delay=False)
+                    elif stage == "color":
+                        action = bot.choose_color(view, cur_id, delay=False)
+                    elif stage == "direction":
+                        action = bot.choose_direction(view, cur_id, delay=False)
+                    elif stage == "target":
+                        action = bot.choose_target(view, cur_id, delay=False)
+                    else:
+                        action = bot.choose_action(view, cur_id, delay=False)
+                    room.bot_ready_at.pop(ready_key, None)
+                    ok, _ = room.engine.handle_action(cur_id, action)
+                    if not ok:
+                        # Fail-safe: avoid freezing a bot turn after special-rule states.
+                        # If normal play is rejected, try drawing to force progress.
+                        if stage == "action":
+                            draw_ok, _ = room.engine.handle_action(cur_id, DrawCard())
+                            if not draw_ok:
+                                room.bot_ready_at[ready_key] = now + room.bot_delay_for_stage(stage)
+                        else:
+                            room.bot_ready_at[ready_key] = now + random.uniform(0.2, 0.5)
+
             after_player_ids = {p.player_id for p in room.engine.state.players}
             removed = set(before_players.keys()) - after_player_ids
             for pid in removed:
                 conn = room.connections.pop(pid, None)
+                # remove from bots mapping if needed
+                if pid in room.bots:
+                    room.bots.pop(pid, None)
+                room.clear_bot_timers_for(pid)
                 room.broadcast_event(
                     "REMOVED", player_name=before_players.get(pid, "?"),
                     reason="disconnect timeout",
@@ -422,6 +483,39 @@ class Server:
             action = action_from_json(payload)
         except (KeyError, ValueError) as exc:
             conn.send_envelope("ACTION_REJECTED", {"reason": f"bad action: {exc}"})
+            return
+        # Handle AddBot on server directly (creates a bot player without a socket)
+        if isinstance(action, AddBot):
+            requester = next((p for p in room.engine.state.players if p.player_id == conn.player_id), None)
+            if requester is None or not requester.is_host:
+                conn.send_envelope("ACTION_REJECTED", {"reason": "Only host can add bots"})
+                return
+            if room.started:
+                conn.send_envelope("ACTION_REJECTED", {"reason": "match already started"})
+                return
+            if room.n_players >= 4:
+                conn.send_envelope("ACTION_REJECTED", {"reason": "room is full"})
+                return
+            # choose smallest available Bot N name
+            existing = [p.name for p in room.engine.state.players if p.name.startswith("Bot ")]
+            nums = set()
+            for name in existing:
+                try:
+                    nums.add(int(name.split(" ")[1]))
+                except Exception:
+                    continue
+            n = 1
+            while n in nums:
+                n += 1
+            bot_name = f"Bot {n}"
+            bot_id = uuid4().hex[:8]
+            if not room.engine.join_room(bot_id, bot_name):
+                conn.send_envelope("ACTION_REJECTED", {"reason": "join failed"})
+                return
+            room.bots[bot_id] = SimpleBot()
+            room.clear_bot_timers_for(bot_id)
+            room.broadcast_event("BOT_ADDED", bot_name=bot_name)
+            room.broadcast_state()
             return
         before_players = {p.player_id: p.name for p in room.engine.state.players}
         before_host = next(

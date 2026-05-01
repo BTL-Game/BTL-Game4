@@ -48,3 +48,8 @@ class Reaction:
 @dataclass(frozen=True)
 class KickPlayer:
     target_player_id: str
+
+
+@dataclass(frozen=True)
+class AddBot:
+    pass
