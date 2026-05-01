@@ -38,7 +38,7 @@ HEARTBEAT_TIMEOUT_SEC = 15.0  # close conn after no PING/data for this long.
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
-@dataclass
+@dataclass(eq=False)
 class Connection:
     sock: socket.socket
     addr: tuple[str, int]

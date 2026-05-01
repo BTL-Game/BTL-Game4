@@ -119,12 +119,17 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
 
     def leave_lobby() -> None:
         # Tell server we're leaving the room (engine handles pre-/post-match).
+        # Use the dedicated LEAVE_ROOM envelope — sending LeaveRoom via the
+        # generic ACTION path would trip the server's kick-cleanup branch,
+        # which closes our own socket.
         if ctx.player_id:
-            from src.core.actions import LeaveRoom
-            network.send(ctx.player_id, LeaveRoom())
+            network.leave_room()
         network.player_id = ""
         network.room_code = ""
         network.is_host = False
+        ctx.current_view = None
+        ctx.player_id = ""
+        ctx.room_code = ""
         go_browser()
 
     def on_state(player_id, view) -> None:

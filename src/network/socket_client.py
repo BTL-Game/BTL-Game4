@@ -90,6 +90,9 @@ class SocketClientNetwork:
     def list_rooms(self) -> None:
         self._send("LIST_ROOMS")
 
+    def leave_room(self) -> None:
+        self._send("LEAVE_ROOM")
+
     # ------------------------------------------------------------------
     # NetworkInterface
     # ------------------------------------------------------------------
