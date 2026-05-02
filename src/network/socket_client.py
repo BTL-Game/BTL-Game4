@@ -93,6 +93,12 @@ class SocketClientNetwork:
     def leave_room(self) -> None:
         self._send("LEAVE_ROOM")
 
+    def send_chat(self, message: str) -> None:
+        msg = message.strip()
+        if not msg:
+            return
+        self._send("CHAT", {"message": msg})
+
     # ------------------------------------------------------------------
     # NetworkInterface
     # ------------------------------------------------------------------

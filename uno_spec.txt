@@ -1,0 +1,218 @@
+Game Programming — SEM252 Custom UNO Online
+
+PROJECT SPECIFICATION
+Assignment: CUSTOM UNO ONLINE
+(Host Room & Real-time Rule Synchronization)
+Library / Engine: Student’s choice (e.g., Pygame, SFML, SDL, Unity, Godot, JavaFX,
+Web stack)
+Submission Deadline: 07/05/2026
+Submission Format: In-class presentation + GitHub repository link + comprehensive
+README.md
+
+1 Game Overview
+This document specifies the requirements for the course project Custom UNO Online.
+The objective is to design and implement a multiplayer turn-based card game with a
+host room architecture and a set of custom house rules.
+The core focus of this project is not advanced AI. Instead, students are expected to
+demonstrate the ability to:
+• manage game state correctly,
+• implement rule-heavy turn-based gameplay,
+• synchronize actions across multiple clients,
+• design a clear and playable user interface,
+• and build a reliable host-authoritative multiplayer system.
+The final game must allow players to create a room, join a room, start a match, and
+complete a full match of Custom UNO under the rules defined in this specification.
+
+2 Learning Outcomes
+By the end of this assignment, students will be able to:
+• Implement a multiplayer turn-based game with synchronized state updates.
+• Design a host-authoritative system in which the host validates all gameplay actions.
+• Manage core card-game data structures such as the draw pile, discard pile, player
+hands, turn order, and pending penalties.
+• Implement and test a rule set containing chained effects and multiplayer interactions.
+1
+
+Game Programming — SEM252 Custom UNO Online
+• Build a user interface that clearly communicates turn order, player state, active effects,
+and end-game conditions.
+• Document the networking architecture and gameplay rules in a technical README.
+
+3 Functional Requirements (MVP)
+Students must implement a Minimum Viable Product (MVP) that fully satisfies the
+following features.
+3.1 Host Room and Multiplayer
+1. Room Creation
+• One player must be able to create a room and become the host.
+• The host is responsible for starting the match.
+2. Room Joining
+• Other players must be able to join using a room code, IP address, or equivalent
+connection method.
+• The game must support a minimum of 2 players and a maximum of 4 players.
+3. Host-Authoritative Game State
+• The host must control shuffling, dealing, turn order, effect resolution, legality
+checking, win checking, and state broadcasting.
+• Clients must not be treated as the final authority for gameplay results.
+4. Synchronized Multiplayer Actions
+• All players must see synchronized updates for actions such as playing a card,
+drawing a card, changing color, swapping hands, triggering the reaction event for
+card 8, stacking penalties, and ending the game.
+3.2 Core UNO Gameplay
+1. Each player must receive an initial hand at the start of the match.
+2. The game must contain a draw pile and a discard pile.
+3. On each turn, a player must be able to play exactly one legal card according to at
+least one of the following:
+• same color,
+• same number,
+2
+
+Game Programming — SEM252 Custom UNO Online
+• same action type,
+• or a valid Wild / Wild Draw Four card.
+4. If the player has no legal move:
+• the player draws one card,
+• if the drawn card is playable, it may be played immediately in the same turn,
+• otherwise, the turn ends.
+5. The match ends when a player satisfies the valid win condition defined by this specification.
+3.3 Standard Cards
+At minimum, the game must support the following standard card types:
+• Number cards
+• Skip
+• Reverse
+• Draw Two (+2)
+• Wild
+• Wild Draw Four (+4)
+Note: For a 2-player match, students may choose whether Reverse behaves exactly like
+the standard rule or is treated as a Skip-like action, but the chosen interpretation must
+be clearly documented in the README.
+
+4 Custom House Rules (Required)
+Students must implement the following custom rules exactly as specified below.
+4.1 Rule of 0
+When a player plays a 0 card:
+• the player must choose a direction: clockwise or counter-clockwise,
+• all players must pass their entire hand in the chosen direction,
+• the hand transfer must occur simultaneously after the card is played,
+3
+
+Game Programming — SEM252 Custom UNO Online
+• this rule affects hand passing only; it does not automatically change the actual turn
+order unless a group explicitly chooses to implement that variation and documents it
+in the README.
+The interface must clearly show which direction was chosen.
+4.2 Rule of 7
+When a player plays a 7 card:
+• the player must choose one specific target player,
+• the two players must swap their entire hands,
+• the swap result must be synchronized across all connected clients.
+The interface must provide a clear way to select the target player.
+4.3 Rule of 8 (Reaction Event)
+When a player plays an 8 card:
+• a reaction event is triggered,
+• all players currently in the match must click a reaction button on screen,
+• the last player to respond receives a penalty of drawing 2 cards.
+To remove ambiguity, the following rules are mandatory:
+• the host must broadcast the start of the reaction event,
+• the event must have a fixed response window (for example, 3 seconds),
+• each client may submit only one valid response,
+• the last valid responder draws 2 cards,
+• if a player does not respond before the time limit, that player is treated as a latest
+responder,
+• if multiple players fail to respond in time, all such players must draw 2 cards.
+The host must be the final authority for deciding the result of the reaction event.
+
+4
+
+Game Programming — SEM252 Custom UNO Online
+4.4 No Win with an Action Card
+A player is not allowed to win by finishing the game with an action / special card.
+For this assignment, the following are treated as non-winning final cards:
+• Skip
+• Reverse
+• Draw Two
+• Wild
+• Wild Draw Four
+The rule is defined as follows:
+• if a player has exactly one card left and that card is a non-winning final card,
+• the player may not play that card to end the match,
+• that action must be treated as an illegal move,
+• the player must either choose a different legal move or draw if no alternative exists.
+4.5 Stacking Rule for +2 and +4
+Stacking is allowed for +2 and +4 cards according to the following rule:
+• if a player is currently under a draw penalty,
+• that player may stack another penalty card only if the new penalty value is greater
+than or equal to the previous one.
+Therefore:
+• after a +2, the next player may respond with:
+– +2, or
+– +4
+• after a +4, the next player may respond only with:
+– +4
+Effect resolution:
+5
+
+Game Programming — SEM252 Custom UNO Online
+• all penalties accumulate,
+• the penalty chain continues to the next player,
+• the first player who cannot or chooses not to continue stacking must:
+– draw the full accumulated penalty,
+– and lose their turn.
+Example:
+• Player A plays +2
+• Player B plays +2
+• Player C plays +4
+• Player D does not play +4
+Player D must draw 8 cards and lose the turn.
+
+5 AI Requirement
+Advanced AI is not required.
+This assignment is primarily about gameplay implementation and multiplayer synchronization. A group may complete the MVP without implementing an AI opponent.
+If a group wishes to add a bot, it may be a very simple one, such as:
+• choosing a random legal card,
+• choosing the color that appears most often in its hand after a Wild card,
+• choosing a random target for the Rule of 7.
+Any bot is considered optional and should not be treated as the main technical focus of
+the project.
+
+6 User Interface Requirements
+The interface must clearly display at least the following:
+• the current player’s hand,
+• the number of cards held by each opponent,
+6
+
+Game Programming — SEM252 Custom UNO Online
+• the top card of the discard pile,
+• the current play direction,
+• whose turn it is,
+• any active effects or pending states, including:
+– pending draw penalties,
+– color selection,
+– target selection for card 7,
+– the reaction event triggered by card 8,
+• and the end-of-game result screen.
+The game is not required to have advanced graphics, but it must be clear, understandable, and playable.
+
+7 Technical Requirements
+7.1 Architecture
+Students may implement the networking layer using one of the following:
+• host-client over sockets,
+• a lightweight client-server model,
+• or an equivalent architecture.
+In all cases, the host must act as the authoritative controller of the game state.
+7.2 Validation and Data Integrity
+The system must correctly handle at least the following situations:
+• the draw pile becomes empty,
+• the draw pile must be rebuilt from the discard pile when appropriate,
+• a client submits an illegal action,
+• a player responds too late during the card-8 reaction event,
+• a player leaves the room before the game starts.
+7
+
+Game Programming — SEM252 Custom UNO Online
+The host must validate:
+• whether the correct player is taking the turn,
+• whether the selected card is legal,
+• whether the target of card 7 is valid,
+• whether a forbidden final action card is being used to attempt a win,
+• whether stacking is legal,
+• and whether a reaction event is currently active.
+

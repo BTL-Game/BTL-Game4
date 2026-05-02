@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pygame
@@ -20,6 +20,10 @@ class AppContext:
     server_address: str = ""
     # toasts: list of (text, expires_at_monotonic)
     toasts: Any = None
+    chat_log: list[tuple[str, str]] = field(default_factory=list)
+    chat_input: str = ""
+    chat_focus: bool = False
+    chat_expanded: bool = True
 
 
 class Scene:

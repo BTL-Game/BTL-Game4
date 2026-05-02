@@ -34,6 +34,7 @@ from src.ai.simple_bot import SimpleBot
 ROOM_GC_AFTER_SEC = 10.0
 TICK_HZ = 4.0  # 4 ticks per second; tight enough for 30s/60s timers + reaction.
 HEARTBEAT_TIMEOUT_SEC = 15.0  # close conn after no PING/data for this long.
+ROOM_CODE_LEN = 8
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +347,7 @@ class Server:
             "JOIN_ROOM": self._on_join_room,
             "LEAVE_ROOM": self._on_leave_room,
             "ACTION": self._on_action,
+            "CHAT": self._on_chat,
             "PING": self._on_ping,
         }.get(msg_type)
         if handler is None:
@@ -366,7 +368,7 @@ class Server:
 
     def _gen_room_code(self) -> str:
         while True:
-            code = "".join(random.choice(string.ascii_uppercase) for _ in range(4))
+            code = "".join(random.choice(string.digits) for _ in range(ROOM_CODE_LEN))
             if code not in self.rooms:
                 return code
 
@@ -399,7 +401,10 @@ class Server:
         if conn.player_id is not None:
             conn.send_envelope("ERROR", {"msg": "already in a room"})
             return
-        code = (payload.get("code") or "").strip().upper()
+        code = (payload.get("code") or "").strip()
+        if not (code.isdigit() and len(code) == ROOM_CODE_LEN):
+            conn.send_envelope("ERROR", {"msg": "invalid room code"})
+            return
         name = (payload.get("name") or "").strip() or "Player"
         room = self.rooms.get(code)
         if room is None:
@@ -556,6 +561,21 @@ class Server:
             )
             room.broadcast_event("MATCH_END", winner_name=winner_name)
         room.broadcast_state()
+
+    def _on_chat(self, conn: Connection, payload: dict[str, Any]) -> None:
+        if conn.player_id is None or conn.room_code is None:
+            conn.send_envelope("ERROR", {"msg": "not in a room"})
+            return
+        room = self.rooms.get(conn.room_code)
+        if room is None:
+            conn.send_envelope("ERROR", {"msg": "room gone"})
+            return
+        msg = str(payload.get("message", "")).strip()
+        if not msg:
+            return
+        if len(msg) > 200:
+            msg = msg[:200]
+        room.broadcast_event("CHAT", player_name=conn.name or "Player", message=msg)
 
     # ------------------------------------------------------------------
     # disconnect

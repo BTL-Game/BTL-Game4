@@ -39,7 +39,7 @@ class GameEngine:
 
     def create_room(self, host_id: str, host_name: str) -> None:
         self.state = GameState()
-        self.state.room_code = "".join(random.choice(string.ascii_uppercase) for _ in range(4))
+        self.state.room_code = "".join(random.choice(string.digits) for _ in range(8))
         self.state.players = [
             Player(player_id=host_id, name=host_name, is_host=True, joined_at=time.monotonic())
         ]

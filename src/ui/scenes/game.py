@@ -21,6 +21,7 @@ from src.ui.theme import (
     CARD_W,
     GREEN,
     MUTED,
+    PANEL,
     RED,
     SCREEN_H,
     SCREEN_W,
@@ -53,6 +54,15 @@ class GameScene(Scene):
         self.dir_cw_rect = pygame.Rect(0, 0, 0, 0)
         self.dir_ccw_rect = pygame.Rect(0, 0, 0, 0)
         self.draw_pile_rect = pygame.Rect(0, 0, 0, 0)
+        # Chat UI
+        self.chat_panel = pygame.Rect(SCREEN_W - 320, 76, 300, 260)
+        self.chat_toggle_btn = Button(pygame.Rect(SCREEN_W - 50, 76, 38, 38), "💬")
+        self.chat_input_rect = pygame.Rect(
+            self.chat_panel.x + 12,
+            self.chat_panel.bottom - 40,
+            self.chat_panel.width - 24,
+            30,
+        )
 
     # ------------------------------------------------------------------
     # input
@@ -110,6 +120,9 @@ class GameScene(Scene):
                     self.ctx.network.send(self.ctx.player_id, ChooseTarget(others[idx].player_id))
             return
 
+        if self._handle_chat_event(event):
+            return
+
         # Normal play.
         if self.draw_btn.clicked(event):
             self.ctx.network.send(self.ctx.player_id, DrawCard())
@@ -137,6 +150,7 @@ class GameScene(Scene):
         self._draw_opponents(screen, view)
         self._draw_center_piles(screen, view)
         self._draw_log(screen, view)
+        self._draw_chat(screen)
         self._draw_hand(screen, view)
         self._draw_buttons(screen, view)
 
@@ -287,6 +301,107 @@ class GameScene(Scene):
         for line in view.log[-7:]:
             screen.blit(self.font.render(line, True, MUTED), (x, y))
             y += 18
+
+    def _draw_chat(self, screen: pygame.Surface) -> None:
+        if not self.ctx.chat_expanded:
+            self._draw_chat_collapsed(screen)
+        else:
+            self._draw_chat_expanded(screen)
+
+    def _draw_chat_collapsed(self, screen: pygame.Surface) -> None:
+        button = pygame.Rect(SCREEN_W - 50, 76, 38, 38)
+        pygame.draw.rect(screen, PANEL, button, border_radius=8)
+        pygame.draw.rect(screen, (60, 70, 80), button, 1, border_radius=8)
+        msg_count = len(self.ctx.chat_log)
+        if msg_count > 0:
+            badge = pygame.Rect(button.right - 18, button.top - 8, 20, 20)
+            pygame.draw.circle(screen, (255, 100, 100), badge.center, 10)
+            count_text = self.font.render(str(min(msg_count, 9)), True, (255, 255, 255))
+            screen.blit(count_text, count_text.get_rect(center=badge.center))
+        chat_text = self.font_b.render("💬", True, ACCENT)
+        screen.blit(chat_text, chat_text.get_rect(center=button.center))
+
+    def _draw_chat_expanded(self, screen: pygame.Surface) -> None:
+        panel = self.chat_panel
+        pygame.draw.rect(screen, PANEL, panel, border_radius=10)
+        pygame.draw.rect(screen, (60, 70, 80), panel, 1, border_radius=10)
+        
+        # Header with close button.
+        header = pygame.Rect(panel.x, panel.y, panel.width, 28)
+        screen.blit(self.font_b.render("Chat", True, ACCENT), (panel.x + 10, panel.y + 6))
+        close_btn = pygame.Rect(panel.right - 28, panel.y + 3, 24, 24)
+        pygame.draw.rect(screen, (90, 90, 90), close_btn, border_radius=4)
+        close_text = self.font.render("✕", True, TEXT)
+        screen.blit(close_text, close_text.get_rect(center=close_btn.center))
+
+        max_w = panel.width - 20
+        y = panel.y + 38
+        for name, msg in self.ctx.chat_log[-9:]:
+            line = f"{name}: {msg}"
+            line = self._fit_text(self.font, line, max_w)
+            screen.blit(self.font.render(line, True, TEXT), (panel.x + 10, y))
+            y += 18
+
+        input_rect = self.chat_input_rect
+        pygame.draw.rect(screen, (245, 240, 225), input_rect, border_radius=6)
+        border = ACCENT if self.ctx.chat_focus else (90, 90, 90)
+        pygame.draw.rect(screen, border, input_rect, 2, border_radius=6)
+        placeholder = "Press T to chat" if not self.ctx.chat_input else ""
+        text = self.ctx.chat_input or placeholder
+        color = (24, 24, 24) if self.ctx.chat_input else (110, 110, 110)
+        text = self._fit_text(self.font, text, input_rect.width - 10)
+        screen.blit(self.font.render(text, True, color), (input_rect.x + 6, input_rect.y + 6))
+
+    def _fit_text(self, font: pygame.font.Font, text: str, max_w: int) -> str:
+        if font.size(text)[0] <= max_w:
+            return text
+        trimmed = text
+        while trimmed and font.size(trimmed + "...")[0] > max_w:
+            trimmed = trimmed[:-1]
+        return (trimmed + "...") if trimmed else "..."
+
+    def _handle_chat_event(self, event: pygame.event.Event) -> bool:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.ctx.chat_expanded:
+                close_btn = pygame.Rect(self.chat_panel.right - 28, self.chat_panel.y + 3, 24, 24)
+                if close_btn.collidepoint(event.pos):
+                    self.ctx.chat_expanded = False
+                    self.ctx.chat_focus = False
+                    return True
+                if self.chat_input_rect.collidepoint(event.pos):
+                    self.ctx.chat_focus = True
+                    return True
+            else:
+                if self.chat_toggle_btn.clicked(event):
+                    self.ctx.chat_expanded = True
+                    return True
+            if self.ctx.chat_focus:
+                self.ctx.chat_focus = False
+        if event.type == pygame.KEYDOWN and not self.ctx.chat_focus:
+            if event.key == pygame.K_t:
+                if not self.ctx.chat_expanded:
+                    self.ctx.chat_expanded = True
+                self.ctx.chat_focus = True
+                return True
+        if self.ctx.chat_focus and event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.ctx.chat_focus = False
+                self.ctx.chat_expanded = False
+                return True
+            if event.key == pygame.K_RETURN:
+                msg = self.ctx.chat_input.strip()
+                if msg and hasattr(self.ctx.network, "send_chat"):
+                    self.ctx.network.send_chat(msg)
+                    self.ctx.chat_input = ""
+                return True
+            if event.key == pygame.K_BACKSPACE:
+                self.ctx.chat_input = self.ctx.chat_input[:-1]
+                return True
+            if event.unicode and event.unicode.isprintable():
+                if len(self.ctx.chat_input) < 80:
+                    self.ctx.chat_input += event.unicode
+                return True
+        return False
 
     # --- modals -------------------------------------------------------
     def _modal_panel(self, screen, w, h, title):

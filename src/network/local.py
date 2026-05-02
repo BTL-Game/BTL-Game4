@@ -66,6 +66,10 @@ class LocalNetwork:
         self._broadcast_all()
         return ok, reason
 
+    def send_chat(self, message: str) -> None:
+        del message
+        # Local network has no chat transport; ignore.
+
     def on_state(self, callback: Callable[[str, GameStateView], None]) -> None:
         self._state_callbacks.append(callback)
 

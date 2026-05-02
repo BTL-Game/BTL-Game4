@@ -15,6 +15,9 @@ class NetworkInterface(Protocol):
     def send(self, player_id: str, action: object) -> tuple[bool, str]:
         ...
 
+    def send_chat(self, message: str) -> None:
+        ...
+
     def on_state(self, callback: Callable[[str, GameStateView], None]) -> None:
         ...
 

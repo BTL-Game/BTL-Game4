@@ -90,6 +90,9 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
     ctx.current_view = None
     ctx.views_by_player = {}
     ctx.toasts = []
+    ctx.chat_log = []
+    ctx.chat_input = ""
+    ctx.chat_focus = False
 
     # ------------------------------------------------------------------
     # navigation callbacks
@@ -98,10 +101,18 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         ctx.current_view = None
         ctx.player_id = ""
         ctx.room_code = ""
+        ctx.chat_log = []
+        ctx.chat_input = ""
+        ctx.chat_focus = False
+        ctx.chat_expanded = True
         scene_manager.switch(MenuScene(ctx, go_browser))
 
     def go_browser() -> None:
         ctx.error = ""
+        ctx.chat_log = []
+        ctx.chat_input = ""
+        ctx.chat_focus = False
+        ctx.chat_expanded = True
         scene_manager.switch(
             LobbyBrowserScene(ctx, on_create=do_create, on_join=do_join, on_back=go_menu)
         )
@@ -158,6 +169,14 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
             ev = network.pop_event()
             if ev is None:
                 break
+            if ev.get("kind") == "CHAT":
+                name = ev.get("player_name", "Player")
+                msg = str(ev.get("message", "")).strip()
+                if msg:
+                    ctx.chat_log.append((name, msg))
+                    if len(ctx.chat_log) > 60:
+                        ctx.chat_log = ctx.chat_log[-60:]
+                continue
             ctx.toasts.append((_format_event(ev), now_t + 4.0))
         # Expire old toasts.
         ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]

@@ -45,7 +45,7 @@ class LobbyBrowserScene(Scene):
         self.join_btn = Button(pygame.Rect(cx - 90, SCREEN_H - 90, 180, 50), "JOIN BY CODE")
         self.refresh_btn = Button(pygame.Rect(cx + 120, SCREEN_H - 90, 130, 50), "REFRESH")
         self.back_btn = Button(pygame.Rect(20, SCREEN_H - 60, 100, 40), "BACK")
-        self.code_box = pygame.Rect(cx - 90, SCREEN_H - 150, 180, 40)
+        self.code_box = pygame.Rect(cx - 120, SCREEN_H - 150, 240, 40)
 
         self._row_rects: list[tuple[str, pygame.Rect]] = []
         # Auto-request initial list.
@@ -69,9 +69,11 @@ class LobbyBrowserScene(Scene):
             self._request_list()
             return
         if self.join_btn.clicked(event):
-            code = self.code_input.strip().upper()
-            if code:
+            code = self.code_input.strip()
+            if len(code) == 8:
                 self._on_join(code)
+            else:
+                self.ctx.error = "Enter an 8-digit code."
             return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self.code_focus = self.code_box.collidepoint(event.pos)
@@ -83,11 +85,13 @@ class LobbyBrowserScene(Scene):
             if event.key == pygame.K_BACKSPACE:
                 self.code_input = self.code_input[:-1]
             elif event.key == pygame.K_RETURN:
-                code = self.code_input.strip().upper()
-                if code:
+                code = self.code_input.strip()
+                if len(code) == 8:
                     self._on_join(code)
-            elif event.unicode.isalnum() and len(self.code_input) < 6:
-                self.code_input = (self.code_input + event.unicode).upper()
+                else:
+                    self.ctx.error = "Enter an 8-digit code."
+            elif event.unicode.isdigit() and len(self.code_input) < 8:
+                self.code_input = self.code_input + event.unicode
 
     def update(self, dt: float) -> None:
         del dt
@@ -154,7 +158,7 @@ class LobbyBrowserScene(Scene):
         pygame.draw.rect(screen, (245, 240, 225), self.code_box, border_radius=8)
         border = ACCENT if self.code_focus else (90, 90, 90)
         pygame.draw.rect(screen, border, self.code_box, 2, border_radius=8)
-        text_surf = self.font_b.render(self.code_input or "____", True, (24, 24, 24))
+        text_surf = self.font_b.render(self.code_input or "________", True, (24, 24, 24))
         screen.blit(text_surf, text_surf.get_rect(center=self.code_box.center))
 
         self.create_btn.draw(screen, self.font)
@@ -166,5 +170,5 @@ class LobbyBrowserScene(Scene):
             err = self.small.render(self.ctx.error, True, (255, 110, 110))
             screen.blit(err, err.get_rect(center=(SCREEN_W // 2, panel.bottom + 24)))
 
-        hint = self.tiny.render("Click a row to join, or type a code and press Enter.", True, MUTED)
+        hint = self.tiny.render("Click a row to join, or type the 8-digit code and press Enter.", True, MUTED)
         screen.blit(hint, (panel.x + 16, SCREEN_H - 165))
