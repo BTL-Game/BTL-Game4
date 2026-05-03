@@ -132,10 +132,10 @@ class Room:
 
     def bot_delay_for_stage(self, stage: str) -> float:
         if stage == "action":
-            return random.uniform(5.0, 10.0)
+            return random.uniform(1.0, 3.0)
         if stage == "reaction":
-            return random.uniform(0.8, 2.2)
-        return random.uniform(0.4, 1.0)
+            return random.uniform(0.6, 1.5)
+        return random.uniform(0.3, 0.8)
 
 
 # ---------------------------------------------------------------------------

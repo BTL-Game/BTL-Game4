@@ -17,6 +17,25 @@ from src.ui.theme import SCREEN_H, SCREEN_W
 
 
 _TOAST_FONT = None
+_ALERT_FONT = None
+
+
+def _friendly_reason(reason: str) -> str:
+    r = reason.strip()
+    low = r.lower()
+    if "must stack +4 on +4" in low:
+        return "Only +4 stacks on a +4 chain"
+    if "must stack +2 or +4" in low:
+        return "Stack +2/+4 or DRAW"
+    if "not legally playable" in low:
+        return "You can't play this card"
+    if "cannot win with an action" in low:
+        return "Can't win on an action card"
+    if "not your turn" in low:
+        return "Not your turn"
+    if "invalid card index" in low:
+        return "Invalid card"
+    return r
 
 
 def _draw_toasts(screen: pygame.Surface, ctx: AppContext) -> None:
@@ -37,6 +56,31 @@ def _draw_toasts(screen: pygame.Surface, ctx: AppContext) -> None:
         screen.blit(bg, (x, y))
         screen.blit(surf, (x + pad, y + pad))
         y += bg.get_height() + 4
+
+
+def _draw_alert(screen: pygame.Surface, ctx: AppContext) -> None:
+    global _ALERT_FONT
+    alert = getattr(ctx, "alert", None)
+    if not alert:
+        return
+    text, exp = alert
+    if time.monotonic() > exp:
+        ctx.alert = None
+        return
+    if _ALERT_FONT is None:
+        _ALERT_FONT = pygame.font.SysFont("arialblack,arial", 22, bold=True)
+    pad_x, pad_y = 18, 10
+    surf = _ALERT_FONT.render(text, True, (255, 255, 255))
+    sw = screen.get_width()
+    bg = pygame.Surface(
+        (surf.get_width() + 2 * pad_x, surf.get_height() + 2 * pad_y), pygame.SRCALPHA
+    )
+    bg.fill((200, 30, 30, 235))
+    pygame.draw.rect(bg, (255, 220, 220), bg.get_rect(), 2, border_radius=8)
+    x = (sw - bg.get_width()) // 2
+    y = 64
+    screen.blit(bg, (x, y))
+    screen.blit(surf, (x + pad_x, y + pad_y))
 
 
 def _format_event(ev: dict) -> str:
@@ -93,6 +137,7 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
     ctx.chat_log = []
     ctx.chat_input = ""
     ctx.chat_focus = False
+    ctx.alert = None
 
     # ------------------------------------------------------------------
     # navigation callbacks
@@ -159,9 +204,14 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         network.update()
 
         # Surface async errors raised by network handlers (rejection / kicked).
-        if network.last_error and not ctx.error:
-            ctx.error = network.last_error
-            network.last_error = ""
+        if network.last_error:
+            if isinstance(scene_manager.current, GameScene):
+                # In-game: show as a prominent red alert instead of menu error text.
+                ctx.alert = (f"⚠ {_friendly_reason(network.last_error)}", time.monotonic() + 3.0)
+                network.last_error = ""
+            elif not ctx.error:
+                ctx.error = network.last_error
+                network.last_error = ""
 
         # Drain transient EVENTs from the network and turn them into toasts.
         now_t = time.monotonic()
@@ -217,6 +267,7 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         scene_manager.current.update(dt)
         scene_manager.current.draw(screen)
         _draw_toasts(screen, ctx)
+        _draw_alert(screen, ctx)
         pygame.display.flip()
 
     network.close()
