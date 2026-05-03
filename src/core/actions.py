@@ -46,6 +46,11 @@ class Reaction:
 
 
 @dataclass(frozen=True)
+class DeclareUno:
+    pass
+
+
+@dataclass(frozen=True)
 class KickPlayer:
     target_player_id: str
 

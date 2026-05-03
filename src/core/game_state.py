@@ -58,6 +58,7 @@ class GameState:
     awaiting_played_card: Card | None = None
     may_play_drawn_for_player: str | None = None
     reaction_event: ReactionEvent = field(default_factory=ReactionEvent)
+    uno_declared: dict[str, bool] = field(default_factory=dict)
     room_code: str = "ABCD"
 
     def player_ids(self) -> list[str]:

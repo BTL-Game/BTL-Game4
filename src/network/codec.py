@@ -19,6 +19,7 @@ from src.core.actions import (
     LeaveRoom,
     PlayCard,
     Reaction,
+    DeclareUno,
     StartMatch,
 )
 from src.core.cards import Card, CardType, Color
@@ -139,6 +140,8 @@ def action_to_json(action: object) -> dict[str, Any]:
         return {"action_type": "ChooseTarget", "target_player_id": action.target_player_id}
     if isinstance(action, Reaction):
         return {"action_type": "Reaction"}
+    if isinstance(action, DeclareUno):
+        return {"action_type": "DeclareUno"}
     if isinstance(action, StartMatch):
         return {"action_type": "StartMatch"}
     if isinstance(action, LeaveRoom):
@@ -164,6 +167,8 @@ def action_from_json(d: dict[str, Any]) -> object:
         return ChooseTarget(target_player_id=str(d["target_player_id"]))
     if t == "Reaction":
         return Reaction()
+    if t == "DeclareUno":
+        return DeclareUno()
     if t == "StartMatch":
         return StartMatch()
     if t == "LeaveRoom":

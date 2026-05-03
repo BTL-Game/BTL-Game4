@@ -9,8 +9,9 @@ from src.core.actions import (
     DrawCard,
     PlayCard,
     Reaction,
+    DeclareUno,
 )
-from src.core.cards import Color
+from src.core.cards import Color, CardType
 from src.ui.scene import AppContext, Scene
 from src.ui.theme import (
     ACCENT,
@@ -63,6 +64,32 @@ class GameScene(Scene):
             self.chat_panel.width - 24,
             30,
         )
+
+        # Local UNO declaration state (client-side indicator)
+        self.uno_declared: bool = False
+        self.uno_declared_until: int = 0
+
+    def _has_playable_card(self, view) -> bool:
+        """Check if the player has at least one playable card in their hand."""
+        try:
+            if view is None or view.self_hand is None or view.top_card is None:
+                return False
+            for card in view.self_hand:
+                # WILD and WILD_DRAW_FOUR are always playable
+                if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
+                    return True
+                # Match by color
+                if card.color == view.current_color:
+                    return True
+                # Match NUMBER by value
+                if card.card_type == CardType.NUMBER and view.top_card.card_type == CardType.NUMBER and card.value == view.top_card.value:
+                    return True
+                # Match by card type (SKIP, DRAW_TWO, REVERSE, etc.)
+                if card.card_type == view.top_card.card_type and card.card_type != CardType.NUMBER:
+                    return True
+            return False
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # input
@@ -127,6 +154,28 @@ class GameScene(Scene):
         if self.draw_btn.clicked(event):
             self.ctx.network.send(self.ctx.player_id, DrawCard())
             return
+        # UNO declaration button
+        if self.uno_btn.clicked(event):
+            # Only allow declaring UNO when player has exactly 2 cards
+            try:
+                hand_len = len(view.self_hand) if view.self_hand is not None else 0
+            except Exception:
+                hand_len = 0
+            if hand_len == 2:
+                try:
+                    if hasattr(self.ctx, "network") and hasattr(self.ctx.network, "send"):
+                        self.ctx.network.send(self.ctx.player_id, DeclareUno())
+                        now = pygame.time.get_ticks()
+                        self.uno_declared = True
+                        self.uno_declared_until = now + 5000
+                    else:
+                        print("[WARN] network interface not available for DeclareUno")
+                except Exception as e:
+                    import traceback
+
+                    print("[ERROR] Exception while sending DeclareUno:")
+                    traceback.print_exc()
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.draw_pile_rect.collidepoint(event.pos):
                 self.ctx.network.send(self.ctx.player_id, DrawCard())
@@ -185,6 +234,11 @@ class GameScene(Scene):
         screen.blit(self.font_b.render(f"Room {view.room_code}", True, TEXT), (16, 14))
         turn_text = f"Turn: {'YOU' if you_turn else turn_name}"
         screen.blit(self.font_b.render(turn_text, True, ACCENT if you_turn else TEXT), (180, 14))
+        # Show local UNO indicator near turn text when declared recently
+        if self.uno_declared and pygame.time.get_ticks() < self.uno_declared_until:
+            txt_w = self.font_b.size(turn_text)[0]
+            tag = self.font_b.render("UNO!", True, (255, 200, 50))
+            screen.blit(tag, (180 + txt_w + 8, 14))
         screen.blit(self.font_b.render(f"Dir: {dir_str}", True, TEXT), (380, 14))
         screen.blit(self.font_b.render("Color:", True, TEXT), (520, 14))
         pygame.draw.circle(screen, col_rgb, (610, 24), 12)
@@ -294,6 +348,14 @@ class GameScene(Scene):
     def _draw_buttons(self, screen: pygame.Surface, view) -> None:
         self.draw_btn.draw(screen, self.font_b)
         self.uno_btn.draw(screen, self.font_b)
+        # Blink/attention effect only when player has exactly 2 cards + has a playable card
+        try:
+            hand_count = len(view.self_hand) if view.self_hand else 0
+        except Exception:
+            hand_count = 0
+        if hand_count == 2 and self._has_playable_card(view):
+            if (pygame.time.get_ticks() // 500) % 2 == 0:
+                pygame.draw.rect(screen, ACCENT, self.uno_btn.rect, 3, border_radius=10)
 
     def _draw_log(self, screen: pygame.Surface, view) -> None:
         x = 16

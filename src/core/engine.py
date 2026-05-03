@@ -8,6 +8,7 @@ from .actions import (
     ChooseColor,
     ChooseDirection,
     ChooseTarget,
+    DeclareUno,
     DrawCard,
     KickPlayer,
     LeaveRoom,
@@ -167,6 +168,7 @@ class GameEngine:
         if self.state.started or len(self.state.players) < 2:
             return False
         self.state.started = True
+        self.state.uno_declared.clear()
         self.state.draw_pile.shuffle()
         for p in self.state.players:
             self.state.hands[p.player_id] = []
@@ -207,6 +209,8 @@ class GameEngine:
             return False, "Match has not started or already ended"
         if isinstance(action, Reaction):
             return self._handle_reaction(player_id)
+        if isinstance(action, DeclareUno):
+            return self._handle_declare_uno(player_id)
         if self.state.reaction_event.active:
             return False, "Only reaction input is allowed now"
         if self.state.current_player_id() != player_id:
@@ -239,6 +243,14 @@ class GameEngine:
             return False, "Already reacted"
         self._push_log(f"{self._player_name(player_id)} reacted.")
         self._resolve_reaction_if_ready()
+        return True, ""
+
+    def _handle_declare_uno(self, player_id: str) -> tuple[bool, str]:
+        hand_size = len(self.state.hands.get(player_id, []))
+        if hand_size != 2:
+            return False, f"Can only declare UNO with exactly 2 cards (you have {hand_size})"
+        self.state.uno_declared[player_id] = True
+        self._push_log(f"{self._player_name(player_id)} declared UNO!")
         return True, ""
 
     def _handle_draw(self, player_id: str) -> tuple[bool, str]:
@@ -290,11 +302,27 @@ class GameEngine:
             return False, result.reason
         self.state.may_play_drawn_for_player = None
         hand = self.state.hands[player_id]
+        
+        # Check UNO violation: if player has 2 cards and didn't declare UNO
+        if len(hand) == 2 and not self.state.uno_declared.get(player_id, False):
+            self._push_log(f"{self._player_name(player_id)} forgot to declare UNO! +2 penalty cards.")
+            for _ in range(2):
+                c = self._draw_card_or_rebuild()
+                if c is not None:
+                    self.state.hands[player_id].append(c)
+            # Validate if the action is still valid after penalty
+            result = self.rules.validate_play(self.state, player_id, action)
+            if not result.ok:
+                return False, "Card no longer playable after UNO penalty"
+            hand = self.state.hands[player_id]
+        
         card = hand.pop(action.hand_index)
         self.state.discard_pile.append(card)
         self.state.top_card = card
         self.state.current_color = card.color if card.color != Color.WILD else self.state.current_color
         self._push_log(f"{self._player_name(player_id)} played {card.code()}.")
+        # Reset UNO declaration after playing
+        self.state.uno_declared[player_id] = False
         if card.card_type == CardType.WILD:
             self.state.awaiting_color_for_player = player_id
             self.state.awaiting_played_card = card
