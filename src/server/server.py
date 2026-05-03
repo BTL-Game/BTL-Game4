@@ -36,6 +36,38 @@ TICK_HZ = 4.0  # 4 ticks per second; tight enough for 30s/60s timers + reaction.
 HEARTBEAT_TIMEOUT_SEC = 15.0  # close conn after no PING/data for this long.
 ROOM_CODE_LEN = 8
 
+# --- abuse limits for online deployment ---------------------------------------
+MAX_LINE_BYTES = 8 * 1024            # drop a connection sending >8KB w/o newline
+MAX_NAME_LEN = 20
+MAX_CHAT_LEN = 200
+MAX_CHAT_PER_10S = 30                # per-conn chat rate (relaxed for class demo)
+MAX_MSG_PER_SEC = 60                 # per-conn overall message rate (token bucket)
+# Per-IP cap protects against a single host opening unbounded sockets, but
+# classmates often share a NAT/dorm gateway, so keep it generous. Total cap
+# is just a sanity ceiling so a runaway client can't exhaust the FD table.
+MAX_CONNS_PER_IP = 64
+MAX_TOTAL_CONNS = 1024
+MAX_ROOMS = 200
+NAME_ALLOWED = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.[]"
+)
+
+
+def _sanitize_name(raw: object) -> str:
+    """Coerce user-supplied name to a printable, length-bounded string."""
+    if not isinstance(raw, str):
+        return ""
+    cleaned = "".join(ch for ch in raw if ch in NAME_ALLOWED).strip()
+    return cleaned[:MAX_NAME_LEN]
+
+
+def _sanitize_chat(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    # keep printable chars, drop control bytes (newlines etc).
+    cleaned = "".join(ch for ch in raw if ch.isprintable()).strip()
+    return cleaned[:MAX_CHAT_LEN]
+
 
 # ---------------------------------------------------------------------------
 # Connection
@@ -49,6 +81,32 @@ class Connection:
     name: str = ""
     closed: bool = False
     last_seen: float = field(default_factory=time.monotonic)
+    # Token bucket for overall message rate.
+    _bucket: float = field(default=float(MAX_MSG_PER_SEC))
+    _bucket_at: float = field(default_factory=time.monotonic)
+    # Sliding chat-rate window timestamps.
+    _chat_times: list[float] = field(default_factory=list)
+
+    def allow_message(self) -> bool:
+        now = time.monotonic()
+        elapsed = now - self._bucket_at
+        self._bucket_at = now
+        self._bucket = min(
+            float(MAX_MSG_PER_SEC),
+            self._bucket + elapsed * MAX_MSG_PER_SEC,
+        )
+        if self._bucket < 1.0:
+            return False
+        self._bucket -= 1.0
+        return True
+
+    def allow_chat(self) -> bool:
+        now = time.monotonic()
+        self._chat_times = [t for t in self._chat_times if now - t < 10.0]
+        if len(self._chat_times) >= MAX_CHAT_PER_10S:
+            return False
+        self._chat_times.append(now)
+        return True
 
     def send_envelope(self, msg_type: str, payload: dict[str, Any] | None = None) -> None:
         if self.closed:
@@ -171,6 +229,16 @@ class Server:
                     continue
                 except OSError:
                     break
+                # Abuse caps: total + per-IP. Reject before spawning a thread.
+                ip = addr[0]
+                with self.lock:
+                    if len(self.all_conns) >= MAX_TOTAL_CONNS:
+                        self._reject_conn(client_sock, "server full")
+                        continue
+                    same_ip = sum(1 for c in self.all_conns if c.addr[0] == ip)
+                    if same_ip >= MAX_CONNS_PER_IP:
+                        self._reject_conn(client_sock, "too many connections from your IP")
+                        continue
                 conn = Connection(sock=client_sock, addr=addr)
                 with self.lock:
                     self.all_conns.add(conn)
@@ -183,6 +251,22 @@ class Server:
         finally:
             s.close()
             print("[server] shut down")
+
+    def _reject_conn(self, sock: socket.socket, reason: str) -> None:
+        """Politely close an over-quota socket without joining the active set."""
+        try:
+            env = {"type": "ERROR", "payload": {"msg": reason}}
+            sock.sendall((json.dumps(env) + "\n").encode("utf-8"))
+        except OSError:
+            pass
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -321,14 +405,30 @@ class Server:
                 if not chunk:
                     break
                 buf += chunk
+                # Hard cap on the unparsed buffer — protects against a peer
+                # that streams bytes without ever sending a newline.
+                if len(buf) > MAX_LINE_BYTES:
+                    conn.send_envelope("ERROR", {"msg": "message too large"})
+                    break
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     if not line.strip():
                         continue
+                    if len(line) > MAX_LINE_BYTES:
+                        conn.send_envelope("ERROR", {"msg": "message too large"})
+                        conn.closed = True
+                        break
                     try:
                         env = json.loads(line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         conn.send_envelope("ERROR", {"msg": "malformed JSON"})
+                        continue
+                    if not isinstance(env, dict):
+                        conn.send_envelope("ERROR", {"msg": "envelope must be object"})
+                        continue
+                    if not conn.allow_message():
+                        # Silently drop — don't echo back, since echoing under
+                        # a flood would make the abuse worse.
                         continue
                     self._dispatch(conn, env)
         finally:
@@ -341,6 +441,9 @@ class Server:
         conn.last_seen = time.monotonic()
         msg_type = env.get("type")
         payload = env.get("payload") or {}
+        if not isinstance(payload, dict):
+            conn.send_envelope("ERROR", {"msg": "payload must be object"})
+            return
         handler = {
             "LIST_ROOMS": self._on_list_rooms,
             "CREATE_ROOM": self._on_create_room,
@@ -349,6 +452,7 @@ class Server:
             "ACTION": self._on_action,
             "CHAT": self._on_chat,
             "PING": self._on_ping,
+            "SERVER_STATUS": self._on_server_status,
         }.get(msg_type)
         if handler is None:
             conn.send_envelope("ERROR", {"msg": f"unknown type {msg_type!r}"})
@@ -360,7 +464,29 @@ class Server:
                 conn.send_envelope("ERROR", {"msg": f"server error: {exc}"})
 
     def _on_ping(self, conn: Connection, payload: dict[str, Any]) -> None:
-        conn.send_envelope("PONG", {"t": payload.get("t", 0.0)})
+        # Coerce timestamp to a number — never echo arbitrary client data back.
+        t_raw = payload.get("t", 0.0)
+        try:
+            t = float(t_raw) if isinstance(t_raw, (int, float, str)) else 0.0
+        except (TypeError, ValueError):
+            t = 0.0
+        conn.send_envelope("PONG", {"t": t})
+
+    def _on_server_status(self, conn: Connection, payload: dict[str, Any]) -> None:
+        del payload
+        n_players = sum(
+            1 for r in self.rooms.values()
+            for p in r.engine.state.players
+            if p.connected and p.player_id not in r.bots
+        )
+        n_visible = sum(1 for r in self.rooms.values() if r.visible)
+        conn.send_envelope("SERVER_STATUS", {
+            "n_rooms": len(self.rooms),
+            "n_visible_rooms": n_visible,
+            "n_players": n_players,
+            "n_connections": len(self.all_conns),
+            "max_connections": MAX_TOTAL_CONNS,
+        })
 
     def _on_list_rooms(self, conn: Connection, payload: dict[str, Any]) -> None:
         rooms = [r.to_summary() for r in self.rooms.values() if r.visible]
@@ -376,7 +502,10 @@ class Server:
         if conn.player_id is not None:
             conn.send_envelope("ERROR", {"msg": "already in a room"})
             return
-        name = (payload.get("name") or "").strip() or "Player"
+        if len(self.rooms) >= MAX_ROOMS:
+            conn.send_envelope("ERROR", {"msg": "server room limit reached"})
+            return
+        name = _sanitize_name(payload.get("name")) or "Player"
         host_id = uuid4().hex[:8]
         engine = GameEngine()
         engine.create_room(host_id, name)
@@ -401,11 +530,12 @@ class Server:
         if conn.player_id is not None:
             conn.send_envelope("ERROR", {"msg": "already in a room"})
             return
-        code = (payload.get("code") or "").strip()
+        code_raw = payload.get("code", "")
+        code = code_raw.strip() if isinstance(code_raw, str) else ""
         if not (code.isdigit() and len(code) == ROOM_CODE_LEN):
             conn.send_envelope("ERROR", {"msg": "invalid room code"})
             return
-        name = (payload.get("name") or "").strip() or "Player"
+        name = _sanitize_name(payload.get("name")) or "Player"
         room = self.rooms.get(code)
         if room is None:
             conn.send_envelope("ERROR", {"msg": f"room {code!r} not found"})
@@ -570,11 +700,12 @@ class Server:
         if room is None:
             conn.send_envelope("ERROR", {"msg": "room gone"})
             return
-        msg = str(payload.get("message", "")).strip()
+        if not conn.allow_chat():
+            conn.send_envelope("ERROR", {"msg": "slow down — chat rate limited"})
+            return
+        msg = _sanitize_chat(payload.get("message"))
         if not msg:
             return
-        if len(msg) > 200:
-            msg = msg[:200]
         room.broadcast_event("CHAT", player_name=conn.name or "Player", message=msg)
 
     # ------------------------------------------------------------------

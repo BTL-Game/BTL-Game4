@@ -4,6 +4,7 @@ import time
 
 import pygame
 
+from src.network.server_probe import DEFAULT_SERVERS, ServerEntry, ServerProbe
 from src.network.socket_client import SocketClientNetwork
 from src.ui.assets import AssetManager
 from src.ui.scene import AppContext
@@ -116,21 +117,30 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
             initial_name: str = "") -> None:
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
-    pygame.display.set_caption(f"Custom UNO Online — {server_host}:{server_port}")
+    pygame.display.set_caption("Custom UNO Online")
     clock = pygame.time.Clock()
 
-    network = SocketClientNetwork(server_host, server_port)
-    try:
-        network.connect()
-    except OSError as exc:
-        print(f"[client] cannot connect to {server_host}:{server_port}: {exc}")
-        print("        start the server first with `python -m src.server`.")
-        pygame.quit()
-        return
+    # Build the advertised server list. If the CLI override doesn't match a
+    # preset, append it as a "Custom" entry and pre-select it.
+    servers: list[ServerEntry] = list(DEFAULT_SERVERS)
+    selected_id = servers[0].id if servers else ""
+    cli_match = next(
+        (s for s in servers if s.host == server_host and s.port == server_port), None
+    )
+    if cli_match is not None:
+        selected_id = cli_match.id
+    elif (server_host, server_port) != ("127.0.0.1", 5555):
+        custom = ServerEntry(id="custom", label=f"Custom ({server_host}:{server_port})",
+                             host=server_host, port=server_port)
+        servers.append(custom)
+        selected_id = custom.id
 
-    ctx = AppContext(network=network, assets=AssetManager())
+    probe = ServerProbe(servers)
+    probe.start()
+
+    ctx = AppContext(network=None, assets=AssetManager())
     ctx.player_name = initial_name
-    ctx.server_address = f"{server_host}:{server_port}"
+    ctx.server_address = ""
     ctx.current_view = None
     ctx.views_by_player = {}
     ctx.toasts = []
@@ -139,10 +149,19 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
     ctx.chat_focus = False
     ctx.alert = None
 
+    network: SocketClientNetwork | None = None
+
     # ------------------------------------------------------------------
     # navigation callbacks
     # ------------------------------------------------------------------
+    def make_menu() -> MenuScene:
+        return MenuScene(
+            ctx, on_continue=connect_and_continue,
+            servers=servers, probe=probe, selected_id=selected_id,
+        )
+
     def go_menu() -> None:
+        nonlocal network
         ctx.current_view = None
         ctx.player_id = ""
         ctx.room_code = ""
@@ -150,7 +169,34 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         ctx.chat_input = ""
         ctx.chat_focus = False
         ctx.chat_expanded = True
-        scene_manager.switch(MenuScene(ctx, go_browser))
+        ctx.error = ""
+        if network is not None:
+            try:
+                network.close()
+            except Exception:
+                pass
+            network = None
+            ctx.network = None
+        ctx.server_address = ""
+        pygame.display.set_caption("Custom UNO Online")
+        scene_manager.switch(make_menu())
+
+    def connect_and_continue(entry: ServerEntry) -> None:
+        nonlocal network, selected_id
+        selected_id = entry.id
+        ctx.error = ""
+        net = SocketClientNetwork(entry.host, entry.port)
+        try:
+            net.connect()
+        except OSError as exc:
+            ctx.error = f"Cannot reach {entry.label}: {exc}"
+            return
+        net.on_state(on_state)
+        network = net
+        ctx.network = net
+        ctx.server_address = f"{entry.host}:{entry.port}"
+        pygame.display.set_caption(f"Custom UNO Online — {entry.label}")
+        go_browser()
 
     def go_browser() -> None:
         ctx.error = ""
@@ -163,10 +209,14 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         )
 
     def do_create() -> None:
+        if network is None:
+            return
         ctx.error = ""
         network.host_room(ctx.player_name or "Player")
 
     def do_join(code: str) -> None:
+        if network is None:
+            return
         ctx.error = ""
         network.join_room(code, ctx.player_name or "Player")
 
@@ -178,11 +228,12 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         # Use the dedicated LEAVE_ROOM envelope — sending LeaveRoom via the
         # generic ACTION path would trip the server's kick-cleanup branch,
         # which closes our own socket.
-        if ctx.player_id:
+        if network is not None and ctx.player_id:
             network.leave_room()
-        network.player_id = ""
-        network.room_code = ""
-        network.is_host = False
+        if network is not None:
+            network.player_id = ""
+            network.room_code = ""
+            network.is_host = False
         ctx.current_view = None
         ctx.player_id = ""
         ctx.room_code = ""
@@ -195,68 +246,62 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         ctx.room_code = view.room_code
         ctx.current_view = view
 
-    network.on_state(on_state)
-    scene_manager = SceneManager(MenuScene(ctx, go_browser))
+    scene_manager = SceneManager(make_menu())
 
     running = True
     while running:
         dt = clock.tick(60) / 1000.0
-        network.update()
+        if network is not None:
+            network.update()
 
-        # Surface async errors raised by network handlers (rejection / kicked).
-        if network.last_error:
-            if isinstance(scene_manager.current, GameScene):
-                # In-game: show as a prominent red alert instead of menu error text.
-                ctx.alert = (f"⚠ {_friendly_reason(network.last_error)}", time.monotonic() + 3.0)
-                network.last_error = ""
-            elif not ctx.error:
-                ctx.error = network.last_error
-                network.last_error = ""
+            # Surface async errors raised by network handlers (rejection / kicked).
+            if network.last_error:
+                if isinstance(scene_manager.current, GameScene):
+                    ctx.alert = (f"⚠ {_friendly_reason(network.last_error)}", time.monotonic() + 3.0)
+                    network.last_error = ""
+                elif not ctx.error:
+                    ctx.error = network.last_error
+                    network.last_error = ""
 
-        # Drain transient EVENTs from the network and turn them into toasts.
-        now_t = time.monotonic()
-        while True:
-            ev = network.pop_event()
-            if ev is None:
-                break
-            if ev.get("kind") == "CHAT":
-                name = ev.get("player_name", "Player")
-                msg = str(ev.get("message", "")).strip()
-                if msg:
-                    ctx.chat_log.append((name, msg))
-                    if len(ctx.chat_log) > 60:
-                        ctx.chat_log = ctx.chat_log[-60:]
-                continue
-            ctx.toasts.append((_format_event(ev), now_t + 4.0))
-        # Expire old toasts.
-        ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]
+            # Drain transient EVENTs from the network and turn them into toasts.
+            now_t = time.monotonic()
+            while True:
+                ev = network.pop_event()
+                if ev is None:
+                    break
+                if ev.get("kind") == "CHAT":
+                    name = ev.get("player_name", "Player")
+                    msg = str(ev.get("message", "")).strip()
+                    if msg:
+                        ctx.chat_log.append((name, msg))
+                        if len(ctx.chat_log) > 60:
+                            ctx.chat_log = ctx.chat_log[-60:]
+                    continue
+                ctx.toasts.append((_format_event(ev), now_t + 4.0))
+            ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]
 
-        # If we just got JOINED, the next STATE will populate the view; transition
-        # into the lobby as soon as we know our player_id.
-        if (
-            network.player_id
-            and ctx.current_view is not None
-            and not isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
-        ):
-            go_lobby()
+            if (
+                network.player_id
+                and ctx.current_view is not None
+                and not isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
+            ):
+                go_lobby()
 
-        # Auto-route on view changes (started/ended).
-        view = ctx.current_view
-        if view is not None and network.player_id:
-            if view.ended and not isinstance(scene_manager.current, EndGameScene):
-                scene_manager.switch(EndGameScene(ctx, leave_lobby))
-            elif view.started and not view.ended and not isinstance(scene_manager.current, GameScene):
-                scene_manager.switch(GameScene(ctx))
-            elif (not view.started) and isinstance(scene_manager.current, GameScene):
-                scene_manager.switch(LobbyScene(ctx, leave_lobby))
+            view = ctx.current_view
+            if view is not None and network.player_id:
+                if view.ended and not isinstance(scene_manager.current, EndGameScene):
+                    scene_manager.switch(EndGameScene(ctx, leave_lobby))
+                elif view.started and not view.ended and not isinstance(scene_manager.current, GameScene):
+                    scene_manager.switch(GameScene(ctx))
+                elif (not view.started) and isinstance(scene_manager.current, GameScene):
+                    scene_manager.switch(LobbyScene(ctx, leave_lobby))
 
-        # If we lost our seat (kicked / connection ended), bounce back to browser.
-        if (
-            not network.player_id
-            and isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
-        ):
-            ctx.current_view = None
-            go_browser()
+            if (
+                not network.player_id
+                and isinstance(scene_manager.current, (LobbyScene, GameScene, EndGameScene))
+            ):
+                ctx.current_view = None
+                go_browser()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -270,5 +315,7 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         _draw_alert(screen, ctx)
         pygame.display.flip()
 
-    network.close()
+    if network is not None:
+        network.close()
+    probe.stop()
     pygame.quit()
