@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+import time
+
 import pygame
 
 from src.core.actions import (
@@ -10,7 +13,7 @@ from src.core.actions import (
     PlayCard,
     Reaction,
 )
-from src.core.cards import Color
+from src.core.cards import CardType, Color
 from src.ui.scene import AppContext, Scene
 from src.ui.theme import (
     ACCENT,
@@ -44,10 +47,13 @@ class GameScene(Scene):
         super().__init__(ctx)
         self.font = pygame.font.SysFont("arial", 16)
         self.font_b = pygame.font.SysFont("arial", 18, bold=True)
-        self.font_big = pygame.font.SysFont("arial", 28, bold=True)
-        self.draw_btn = Button(pygame.Rect(SCREEN_W - 200, SCREEN_H - 60, 80, 44), "DRAW")
-        self.uno_btn = Button(pygame.Rect(SCREEN_W - 110, SCREEN_H - 60, 90, 44), "UNO!")
-        self.react_btn = Button(pygame.Rect(SCREEN_W // 2 - 70, SCREEN_H // 2 + 110, 140, 50), "REACT!")
+        self.font_big = pygame.font.SysFont("arial", 30, bold=True)
+        self.font_huge = pygame.font.SysFont("arialblack,arial", 48, bold=True)
+        self.draw_btn = Button(pygame.Rect(24, SCREEN_H - 78, 160, 56), "DRAW")
+        self.uno_btn = Button(pygame.Rect(SCREEN_W - 196, SCREEN_H - 86, 172, 72), "UNO!")
+        self.react_btn = Button(pygame.Rect(SCREEN_W // 2 - 80, SCREEN_H // 2 + 110, 160, 54), "REACT!")
+        self.effects: list[dict] = []
+        self._last_effect_key = ""
         self.card_rects: list[tuple[int, pygame.Rect]] = []
         self.color_rects: list[tuple[Color, pygame.Rect]] = []
         self.target_rects: list[tuple[str, pygame.Rect]] = []
@@ -55,14 +61,20 @@ class GameScene(Scene):
         self.dir_ccw_rect = pygame.Rect(0, 0, 0, 0)
         self.draw_pile_rect = pygame.Rect(0, 0, 0, 0)
         # Chat UI
-        self.chat_panel = pygame.Rect(SCREEN_W - 320, 76, 300, 260)
-        self.chat_toggle_btn = Button(pygame.Rect(SCREEN_W - 50, 76, 38, 38), "💬")
+        self.chat_panel = pygame.Rect(SCREEN_W - 312, 84, 292, 260)
+        self.chat_toggle_btn = Button(pygame.Rect(SCREEN_W - 58, 84, 42, 42), "💬")
         self.chat_input_rect = pygame.Rect(
             self.chat_panel.x + 12,
             self.chat_panel.bottom - 40,
             self.chat_panel.width - 24,
             30,
         )
+
+    def update(self, dt: float) -> None:
+        # Keep the temporary visual effects list small even if the window is idle.
+        del dt
+        now = pygame.time.get_ticks()
+        self.effects = [fx for fx in self.effects if now - fx["created"] <= fx["duration"]]
 
     # ------------------------------------------------------------------
     # input
@@ -75,6 +87,7 @@ class GameScene(Scene):
         # Reaction event takes priority over everything else.
         if view.reaction_active:
             if self.react_btn.clicked(event):
+                self.ctx.assets.play_sound("assets/sounds/cardplay_3.mp3")
                 self.ctx.network.send(self.ctx.player_id, Reaction())
             return
 
@@ -125,14 +138,24 @@ class GameScene(Scene):
 
         # Normal play.
         if self.draw_btn.clicked(event):
+            self._play_draw_sound()
             self.ctx.network.send(self.ctx.player_id, DrawCard())
+            return
+        if self.uno_btn.clicked(event):
+            self.ctx.assets.play_sound("assets/sounds/cardplay_3.mp3")
+            if isinstance(self.ctx.toasts, list):
+                self.ctx.toasts.append(("UNO!", time.monotonic() + 1.4))
             return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.draw_pile_rect.collidepoint(event.pos):
+                self._play_draw_sound()
                 self.ctx.network.send(self.ctx.player_id, DrawCard())
                 return
             for idx, rect in self.card_rects:
                 if rect.collidepoint(event.pos):
+                    card = view.self_hand[idx]
+                    self._play_card_sound(card)
+                    self._spawn_card_effect(card)
                     self.ctx.network.send(self.ctx.player_id, PlayCard(hand_index=idx))
                     return
 
@@ -141,7 +164,7 @@ class GameScene(Scene):
     # ------------------------------------------------------------------
     def draw(self, screen: pygame.Surface) -> None:
         view = self.ctx.current_view
-        screen.fill(BG)
+        self._draw_background(screen)
         if view is None:
             return
 
@@ -149,6 +172,7 @@ class GameScene(Scene):
         self._draw_top_bar(screen, view)
         self._draw_opponents(screen, view)
         self._draw_center_piles(screen, view)
+        self._draw_effects(screen)
         self._draw_log(screen, view)
         self._draw_chat(screen)
         self._draw_hand(screen, view)
@@ -168,139 +192,358 @@ class GameScene(Scene):
             if view.awaiting_color_for_player or view.awaiting_direction_for_player or view.awaiting_target_for_player:
                 self._draw_waiting_modal(screen, view)
 
+    def _draw_background(self, screen: pygame.Surface) -> None:
+        bg = self.ctx.assets.image_first(
+            ["assets/scenes/bg_1.jpg", "assets/scenes/bg_2.jpg", "assets/scenes/bg_1.avif"],
+            (SCREEN_W, SCREEN_H),
+        )
+        if bg is not None:
+            screen.blit(bg, (0, 0))
+            overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 85))
+            screen.blit(overlay, (0, 0))
+        else:
+            screen.fill(BG)
+
+    def _draw_glass_rect(
+        self,
+        screen: pygame.Surface,
+        rect: pygame.Rect,
+        fill=(15, 18, 32, 180),
+        border=(145, 120, 255, 120),
+        radius: int = 16,
+    ) -> None:
+        panel = pygame.Surface(rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(panel, fill, panel.get_rect(), border_radius=radius)
+        screen.blit(panel, rect.topleft)
+        pygame.draw.rect(screen, border, rect, 2, border_radius=radius)
+
+    def _draw_card_shadow(self, screen: pygame.Surface, rect: pygame.Rect, alpha: int = 95) -> None:
+        shadow = pygame.Surface((rect.width + 12, rect.height + 12), pygame.SRCALPHA)
+        pygame.draw.rect(shadow, (0, 0, 0, alpha), shadow.get_rect(), border_radius=14)
+        screen.blit(shadow, (rect.x + 6, rect.y + 8))
+
     def _draw_table_oval(self, screen: pygame.Surface) -> None:
-        pygame.draw.ellipse(screen, BG_DARK, (60, 100, SCREEN_W - 120, SCREEN_H - 260))
+        table_rect = pygame.Rect(46, 92, SCREEN_W - 92, SCREEN_H - 230)
+        # Shadow/rim.
+        pygame.draw.ellipse(screen, (28, 13, 8), table_rect.inflate(34, 34))
+        pygame.draw.ellipse(screen, (119, 66, 31), table_rect.inflate(18, 18))
+        # Felt surface.
+        felt = pygame.Surface(table_rect.size, pygame.SRCALPHA)
+        pygame.draw.ellipse(felt, (*BG_DARK, 238), felt.get_rect())
+        pygame.draw.ellipse(felt, (23, 121, 73, 220), felt.get_rect().inflate(-26, -26), 4)
+        pygame.draw.ellipse(felt, (255, 255, 255, 22), felt.get_rect().inflate(-90, -74), 2)
+        screen.blit(felt, table_rect.topleft)
 
     def _draw_top_bar(self, screen: pygame.Surface, view) -> None:
-        pygame.draw.rect(screen, (0, 0, 0, 80), (0, 0, SCREEN_W, 56))
-        turn_name = next(
-            (p.name for p in view.players if p.player_id == view.turn_player_id),
-            "?",
-        )
+        bar = pygame.Rect(92, 10, SCREEN_W - 184, 58)
+        self._draw_glass_rect(screen, bar, fill=(10, 12, 28, 220), border=(145, 100, 255, 170), radius=18)
+        turn_name = next((p.name for p in view.players if p.player_id == view.turn_player_id), "?")
         you_turn = view.turn_player_id == self.ctx.player_id
-        dir_str = "↻ CW" if view.direction == 1 else "↺ CCW"
+        dir_icon = "↻" if view.direction == 1 else "↺"
+        dir_str = "CLOCKWISE" if view.direction == 1 else "COUNTER"
         col = view.current_color.value.upper() if view.current_color else "—"
         col_rgb = COLOR_RGB.get(view.current_color, MUTED)
 
-        screen.blit(self.font_b.render(f"Room {view.room_code}", True, TEXT), (16, 14))
-        turn_text = f"Turn: {'YOU' if you_turn else turn_name}"
-        screen.blit(self.font_b.render(turn_text, True, ACCENT if you_turn else TEXT), (180, 14))
-        screen.blit(self.font_b.render(f"Dir: {dir_str}", True, TEXT), (380, 14))
-        screen.blit(self.font_b.render("Color:", True, TEXT), (520, 14))
-        pygame.draw.circle(screen, col_rgb, (610, 24), 12)
-        screen.blit(self.font.render(col, True, TEXT), (628, 16))
-        screen.blit(
-            self.font_b.render(f"Pending: +{view.pending_penalty}", True,
-                               (255, 120, 120) if view.pending_penalty else TEXT),
-            (760, 14),
-        )
-        screen.blit(self.font.render(f"Deck: {view.draw_count}", True, MUTED), (940, 18))
+        items = [
+            ("ROOM", view.room_code, 118),
+            ("TURN", "YOU" if you_turn else turn_name, 150),
+            ("DIR", f"{dir_icon} {dir_str}", 150),
+            ("COLOR", col, 120),
+            ("PENDING", f"+{view.pending_penalty}", 130),
+            ("DECK", str(view.draw_count), 88),
+        ]
+        x = bar.x + 18
+        for label, value, width in items:
+            label_surf = self.font.render(label, True, (190, 170, 255))
+            screen.blit(label_surf, (x, bar.y + 7))
+            value_color = ACCENT if (label == "TURN" and you_turn) else TEXT
+            if label == "PENDING" and view.pending_penalty:
+                value_color = (255, 115, 230)
+            value_surf = self.font_b.render(value, True, value_color)
+            if label == "COLOR":
+                pygame.draw.circle(screen, col_rgb, (x + 18, bar.y + 38), 13)
+                pygame.draw.circle(screen, TEXT, (x + 18, bar.y + 38), 13, 2)
+                screen.blit(value_surf, (x + 38, bar.y + 29))
+            else:
+                screen.blit(value_surf, (x, bar.y + 29))
+            x += width
+            pygame.draw.line(screen, (255, 255, 255, 45), (x - 14, bar.y + 10), (x - 14, bar.bottom - 10), 1)
+
+        # Tiny sound/music status buttons. They are visual only; audio is controlled by pygame mixer.
+        for i, label in enumerate(("🔊", "♫")):
+            r = pygame.Rect(SCREEN_W - 78 + i * 36, 18, 30, 30)
+            pygame.draw.rect(screen, (42, 36, 72), r, border_radius=9)
+            screen.blit(self.font_b.render(label, True, TEXT), self.font_b.render(label, True, TEXT).get_rect(center=r.center))
 
     def _draw_opponents(self, screen: pygame.Surface, view) -> None:
         others = [p for p in view.players if p.player_id != self.ctx.player_id]
-        # Top, left, right slots based on count.
         slots = []
         if len(others) == 1:
-            slots = [("top", SCREEN_W // 2, 130)]
+            slots = [("top", SCREEN_W // 2, 122)]
         elif len(others) == 2:
-            slots = [("left", 130, SCREEN_H // 2 - 30), ("right", SCREEN_W - 130, SCREEN_H // 2 - 30)]
+            slots = [("left", 124, SCREEN_H // 2 - 38), ("right", SCREEN_W - 124, SCREEN_H // 2 - 38)]
         elif len(others) >= 3:
             slots = [
-                ("left", 130, SCREEN_H // 2 - 30),
-                ("top", SCREEN_W // 2, 130),
-                ("right", SCREEN_W - 130, SCREEN_H // 2 - 30),
+                ("left", 124, SCREEN_H // 2 - 38),
+                ("top", SCREEN_W // 2, 122),
+                ("right", SCREEN_W - 124, SCREEN_H // 2 - 38),
             ]
-        for (where, cx, cy), opp in zip(slots, others):
-            self._draw_opponent(screen, opp, cx, cy, where, opp.player_id == view.turn_player_id)
+        for avatar_index, ((where, cx, cy), opp) in enumerate(zip(slots, others)):
+            self._draw_opponent(screen, opp, cx, cy, where, opp.player_id == view.turn_player_id, avatar_index)
 
-    def _draw_opponent(self, screen, opp, cx, cy, where, is_turn) -> None:
-        # Mini back-of-card row.
+    def _draw_opponent(self, screen, opp, cx, cy, where, is_turn, avatar_index: int) -> None:
+        panel_w = 230 if where == "top" else 190
+        panel_h = 126
+        panel = pygame.Rect(cx - panel_w // 2, cy - 62, panel_w, panel_h)
+        self._draw_glass_rect(
+            screen,
+            panel,
+            fill=(11, 13, 24, 170),
+            border=(255, 215, 0, 190) if is_turn and opp.connected else (130, 130, 170, 80),
+            radius=18,
+        )
+
+        avatar_size = 62
+        avatar_paths = [
+            f"assets/avatars/{opp.name.lower()}.png",
+            f"assets/avatars/{opp.name.lower()}.jpg",
+            f"assets/avatars/avt_{avatar_index + 1}.jpg",
+            f"assets/avatars/avt_{avatar_index + 1}.png",
+            "assets/avatars/default.png",
+            "assets/avatars/avt_4.jpg",
+        ]
+        avatar_file = self.ctx.assets.first_existing(avatar_paths)
+        if avatar_file is not None:
+            try:
+                avatar = self.ctx.assets.circular_image(avatar_file, avatar_size)
+                a_rect = avatar.get_rect(center=(cx, panel.y + 36))
+                screen.blit(avatar, a_rect)
+                pygame.draw.circle(screen, ACCENT if is_turn else (230, 230, 240), a_rect.center, avatar_size // 2 + 3, 3)
+            except Exception:
+                pass
+
+        name_color = ACCENT if is_turn else TEXT
+        if not opp.connected:
+            name_color = (170, 170, 170)
+        nameplate = pygame.Rect(cx - 70, panel.y + 68, 140, 28)
+        pygame.draw.rect(screen, (45, 44, 78), nameplate, border_radius=10)
+        pygame.draw.rect(screen, (255, 255, 255, 65), nameplate, 1, border_radius=10)
+        name = self.font_b.render(opp.name, True, name_color)
+        screen.blit(name, name.get_rect(center=nameplate.center))
+
+        count_badge = pygame.Rect(nameplate.right - 7, nameplate.y - 4, 34, 34)
+        pygame.draw.rect(screen, (245, 230, 95), count_badge, border_radius=10)
+        pygame.draw.rect(screen, (40, 30, 20), count_badge, 2, border_radius=10)
+        count_text = self.font_b.render(str(opp.card_count), True, (30, 25, 20))
+        screen.blit(count_text, count_text.get_rect(center=count_badge.center))
+
         n = max(1, min(opp.card_count, 7))
-        mini = (40, 60)
-        spacing = 14
+        mini = (32, 48)
+        spacing = 13
         total_w = mini[0] + spacing * (n - 1)
         x0 = cx - total_w // 2
-        y = cy
+        y = panel.bottom - mini[1] - 4
         for i in range(n):
+            card_rect = pygame.Rect(x0 + i * spacing, y, *mini)
+            self._draw_card_shadow(screen, card_rect, alpha=45)
             back = self.ctx.assets.card_back(mini)
             if not opp.connected:
                 back = back.copy()
                 back.set_alpha(110)
-            screen.blit(back, (x0 + i * spacing, y))
-        name_color = ACCENT if is_turn else TEXT
-        if not opp.connected:
-            name_color = (170, 170, 170)
-        name = self.font_b.render(f"{opp.name} ({opp.card_count})", True, name_color)
-        screen.blit(name, name.get_rect(center=(cx, y - 16)))
-        if is_turn and opp.connected:
-            pygame.draw.rect(screen, ACCENT,
-                             (x0 - 6, y - 28, total_w + mini[0] + 12, mini[1] + 36),
-                             2, border_radius=8)
+            angle = (i - (n - 1) / 2) * 3
+            rotated = pygame.transform.rotozoom(back, -angle, 1.0)
+            screen.blit(rotated, rotated.get_rect(center=card_rect.center))
+
         if not opp.connected:
             remain_total = max(0, int(60 - opp.disconnect_seconds))
             remain_skip = max(0, int(30 - opp.disconnect_seconds))
-            label = (
-                f"DISCONNECTED  skip in {remain_skip}s"
-                if remain_skip > 0
-                else f"DISCONNECTED  remove in {remain_total}s"
-            )
+            label = f"OFFLINE: skip {remain_skip}s" if remain_skip > 0 else f"REMOVE {remain_total}s"
             tag = self.font.render(label, True, (255, 160, 120))
-            screen.blit(tag, tag.get_rect(center=(cx, y + mini[1] + 14)))
+            screen.blit(tag, tag.get_rect(center=(cx, panel.bottom + 14)))
 
     def _draw_center_piles(self, screen: pygame.Surface, view) -> None:
-        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 10
-        # Draw pile (left).
-        self.draw_pile_rect = pygame.Rect(cx - CARD_W - 30, cy - CARD_H // 2, CARD_W, CARD_H)
+        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 6
+        self.draw_pile_rect = pygame.Rect(cx - CARD_W - 42, cy - CARD_H // 2, CARD_W, CARD_H)
+        disc = pygame.Rect(cx + 42, cy - CARD_H // 2, CARD_W, CARD_H)
+
+        for rect in (self.draw_pile_rect, disc):
+            self._draw_card_shadow(screen, rect, alpha=125)
+
         if view.draw_count > 0:
-            screen.blit(self.ctx.assets.card_back((CARD_W, CARD_H)), self.draw_pile_rect)
+            stack_offsets = [(8, 8), (4, 4), (0, 0)]
+            for ox, oy in stack_offsets:
+                screen.blit(self.ctx.assets.card_back((CARD_W, CARD_H)), self.draw_pile_rect.move(ox, oy))
         else:
             pygame.draw.rect(screen, BG_DARK, self.draw_pile_rect, border_radius=12)
-        screen.blit(self.font.render(f"DRAW", True, MUTED),
-                    (self.draw_pile_rect.centerx - 18, self.draw_pile_rect.bottom + 4))
 
-        # Discard pile (right).
-        disc = pygame.Rect(cx + 30, cy - CARD_H // 2, CARD_W, CARD_H)
         if view.top_card is not None:
             surf = self.ctx.assets.card_surface(view.top_card, (CARD_W, CARD_H))
             screen.blit(surf, disc)
+            if view.top_card.card_type in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR, CardType.REVERSE, CardType.SKIP):
+                pygame.draw.rect(screen, ACCENT, disc.inflate(8, 8), 3, border_radius=15)
         else:
             pygame.draw.rect(screen, BG_DARK, disc, border_radius=12)
-        screen.blit(self.font.render("DISCARD", True, MUTED),
-                    (disc.centerx - 28, disc.bottom + 4))
+
+        for label, rect in (("DRAW", self.draw_pile_rect), ("DISCARD", disc)):
+            pill = pygame.Rect(0, 0, 88, 24)
+            pill.center = (rect.centerx, rect.bottom + 18)
+            self._draw_glass_rect(screen, pill, fill=(0, 0, 0, 135), border=(255, 255, 255, 45), radius=10)
+            txt = self.font.render(label, True, TEXT)
+            screen.blit(txt, txt.get_rect(center=pill.center))
+
+        if view.pending_penalty:
+            txt = self.font_huge.render(f"+{view.pending_penalty}", True, (255, 95, 230))
+            screen.blit(txt, txt.get_rect(center=(cx, cy - CARD_H // 2 - 36)))
 
     def _draw_hand(self, screen: pygame.Surface, view) -> None:
         self.card_rects.clear()
         n = len(view.self_hand)
         if n == 0:
             return
-        max_w = SCREEN_W - 240
-        spacing = min(CARD_W + 8, max_w // max(1, n))
+        max_w = SCREEN_W - 270
+        spacing = min(CARD_W + 10, max_w // max(1, n))
         total_w = spacing * (n - 1) + CARD_W
         x0 = (SCREEN_W - total_w) // 2
-        y = SCREEN_H - CARD_H - 30
+        y = SCREEN_H - CARD_H - 38
         mouse = pygame.mouse.get_pos()
         is_my_turn = view.turn_player_id == self.ctx.player_id
         for idx, card in enumerate(view.self_hand):
             rect = pygame.Rect(x0 + idx * spacing, y, CARD_W, CARD_H)
             hover = rect.collidepoint(mouse)
             if hover:
-                rect = rect.move(0, -16)
+                rect = rect.move(0, -18)
+            self._draw_card_shadow(screen, rect, alpha=95 if hover else 70)
             surf = self.ctx.assets.card_surface(card, (CARD_W, CARD_H))
             screen.blit(surf, rect)
             if is_my_turn and hover:
-                pygame.draw.rect(screen, ACCENT, rect, 3, border_radius=12)
+                pygame.draw.rect(screen, ACCENT, rect.inflate(6, 6), 3, border_radius=14)
             self.card_rects.append((idx, rect))
 
     def _draw_buttons(self, screen: pygame.Surface, view) -> None:
         self.draw_btn.draw(screen, self.font_b)
-        self.uno_btn.draw(screen, self.font_b)
+        uno_img = self.ctx.assets.image_first(["assets/buttons/UNO_button.png"], self.uno_btn.rect.size)
+        if uno_img is not None:
+            screen.blit(uno_img, self.uno_btn.rect)
+            if self.uno_btn.rect.collidepoint(pygame.mouse.get_pos()):
+                pygame.draw.rect(screen, ACCENT, self.uno_btn.rect.inflate(4, 4), 3, border_radius=22)
+        else:
+            self.uno_btn.draw(screen, self.font_b)
 
     def _draw_log(self, screen: pygame.Surface, view) -> None:
-        x = 16
-        y = 70
+        if not view.log:
+            return
+        panel = pygame.Rect(16, 86, 280, 150)
+        self._draw_glass_rect(screen, panel, fill=(7, 8, 16, 130), border=(255, 255, 255, 45), radius=14)
+        y = panel.y + 12
         for line in view.log[-7:]:
-            screen.blit(self.font.render(line, True, MUTED), (x, y))
+            line = self._fit_text(self.font, line, panel.width - 20)
+            screen.blit(self.font.render(line, True, MUTED), (panel.x + 10, y))
             y += 18
+
+    def _play_draw_sound(self) -> None:
+        self.ctx.assets.play_sound("assets/sounds/carddraw_1.mp3", "assets/sounds/carddraw_2.mp3")
+
+    def _play_card_sound(self, card) -> None:
+        if card.card_type == CardType.WILD_DRAW_FOUR:
+            self.ctx.assets.play_sound("assets/sounds/cardplay_3.mp3", "assets/sounds/cardplay_2.mp3")
+        elif card.card_type == CardType.DRAW_TWO:
+            self.ctx.assets.play_sound("assets/sounds/cardplay_2.mp3", "assets/sounds/cardplay_1.mp3")
+        else:
+            self.ctx.assets.play_sound("assets/sounds/cardplay_1.mp3", "assets/sounds/cardplay_2.mp3")
+
+    def _spawn_card_effect(self, card) -> None:
+        kind = None
+        duration = 760
+        if card.card_type == CardType.DRAW_TWO:
+            kind = "plus2"
+        elif card.card_type == CardType.WILD_DRAW_FOUR:
+            kind = "plus4"
+            duration = 980
+        elif card.card_type == CardType.REVERSE:
+            kind = "reverse"
+        elif card.card_type == CardType.SKIP:
+            kind = "skip"
+        if kind is None:
+            return
+        now = pygame.time.get_ticks()
+        # Avoid several identical effects in the same click-frame.
+        key = f"{kind}:{now // 120}"
+        if key == self._last_effect_key:
+            return
+        self._last_effect_key = key
+        self.effects.append({"kind": kind, "created": now, "duration": duration})
+
+    def _draw_effects(self, screen: pygame.Surface) -> None:
+        if not self.effects:
+            return
+        now = pygame.time.get_ticks()
+        alive = []
+        for fx in self.effects:
+            age = now - fx["created"]
+            if age > fx["duration"]:
+                continue
+            t = max(0.0, min(1.0, age / fx["duration"]))
+            kind = fx["kind"]
+            if kind == "plus4":
+                self._draw_burst_effect(screen, "+4 CHAOS!", t, (255, 92, 235))
+            elif kind == "plus2":
+                self._draw_burst_effect(screen, "+2", t, (80, 190, 255))
+            elif kind == "reverse":
+                self._draw_reverse_effect(screen, t)
+            elif kind == "skip":
+                self._draw_burst_effect(screen, "NOPE!", t, (255, 220, 60))
+            alive.append(fx)
+        self.effects = alive
+
+    def _draw_burst_effect(self, screen: pygame.Surface, label: str, t: float, color) -> None:
+        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 20
+        alpha = int(255 * (1 - t))
+        radius = int(36 + 120 * t)
+        burst = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+        for i in range(18):
+            ang = (i / 18.0) * math.tau
+            inner = radius * 0.25
+            outer = radius * (0.85 + 0.22 * (i % 2))
+            p1 = (int(cx + math.cos(ang - 0.07) * inner), int(cy + math.sin(ang - 0.07) * inner))
+            p2 = (int(cx + math.cos(ang) * outer), int(cy + math.sin(ang) * outer))
+            p3 = (int(cx + math.cos(ang + 0.07) * inner), int(cy + math.sin(ang + 0.07) * inner))
+            pygame.draw.polygon(burst, (*color, max(0, alpha - 40)), [p1, p2, p3])
+        pygame.draw.circle(burst, (*color, max(0, alpha // 3)), (cx, cy), radius, 4)
+        screen.blit(burst, (0, 0))
+
+        scale = 1.0 + 0.25 * math.sin(t * math.pi)
+        font_size = int((46 if len(label) <= 3 else 38) * scale)
+        font = pygame.font.SysFont("arialblack,arial", font_size, bold=True)
+        txt_shadow = font.render(label, True, (0, 0, 0))
+        txt = font.render(label, True, color)
+        txt.set_alpha(alpha)
+        txt_shadow.set_alpha(alpha)
+        center = (cx, cy - int(15 * t))
+        screen.blit(txt_shadow, txt_shadow.get_rect(center=(center[0] + 3, center[1] + 4)))
+        screen.blit(txt, txt.get_rect(center=center))
+
+    def _draw_reverse_effect(self, screen: pygame.Surface, t: float) -> None:
+        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 14
+        alpha = int(230 * (1 - t))
+        radius = 76 + int(40 * t)
+        fx = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+        rect = pygame.Rect(0, 0, radius * 2, radius * 2)
+        rect.center = (cx, cy)
+        pygame.draw.arc(fx, (120, 255, 100, alpha), rect, 0.25, math.pi + 0.25, 8)
+        pygame.draw.arc(fx, (120, 255, 100, alpha), rect, math.pi + 0.25, math.tau + 0.25, 8)
+        for ang in (0.25, math.pi + 0.25):
+            ax = int(cx + math.cos(ang) * radius)
+            ay = int(cy + math.sin(ang) * radius)
+            pygame.draw.polygon(
+                fx,
+                (120, 255, 100, alpha),
+                [(ax, ay), (ax - 18, ay - 8), (ax - 8, ay + 18)],
+            )
+        screen.blit(fx, (0, 0))
+        txt = self.font_huge.render("REVERSE!", True, (150, 255, 120))
+        txt.set_alpha(alpha)
+        screen.blit(txt, txt.get_rect(center=(cx, cy)))
 
     def _draw_chat(self, screen: pygame.Surface) -> None:
         if not self.ctx.chat_expanded:
@@ -310,8 +553,7 @@ class GameScene(Scene):
 
     def _draw_chat_collapsed(self, screen: pygame.Surface) -> None:
         button = pygame.Rect(SCREEN_W - 50, 76, 38, 38)
-        pygame.draw.rect(screen, PANEL, button, border_radius=8)
-        pygame.draw.rect(screen, (60, 70, 80), button, 1, border_radius=8)
+        self._draw_glass_rect(screen, button, fill=(9, 10, 24, 205), border=(145, 100, 255, 110), radius=10)
         msg_count = len(self.ctx.chat_log)
         if msg_count > 0:
             badge = pygame.Rect(button.right - 18, button.top - 8, 20, 20)
@@ -323,8 +565,7 @@ class GameScene(Scene):
 
     def _draw_chat_expanded(self, screen: pygame.Surface) -> None:
         panel = self.chat_panel
-        pygame.draw.rect(screen, PANEL, panel, border_radius=10)
-        pygame.draw.rect(screen, (60, 70, 80), panel, 1, border_radius=10)
+        self._draw_glass_rect(screen, panel, fill=(9, 10, 24, 205), border=(145, 100, 255, 110), radius=14)
         
         # Header with close button.
         header = pygame.Rect(panel.x, panel.y, panel.width, 28)
