@@ -70,7 +70,15 @@ def _format_event(ev: dict) -> str:
 
 def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
             initial_name: str = "") -> None:
+    pygame.mixer.pre_init(44100, -16, 2, 512)
     pygame.init()
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+        pygame.mixer.set_num_channels(16)
+    except Exception:
+        # Keep the game playable on machines without an audio device.
+        pass
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     pygame.display.set_caption(f"Custom UNO Online — {server_host}:{server_port}")
     clock = pygame.time.Clock()
@@ -85,6 +93,7 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         return
 
     ctx = AppContext(network=network, assets=AssetManager())
+    ctx.assets.play_music(["assets/sounds/intro_1.mp3", "assets/sounds/bg_1.mp3"], volume=0.20)
     ctx.player_name = initial_name
     ctx.server_address = f"{server_host}:{server_port}"
     ctx.current_view = None
@@ -177,6 +186,14 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
                     if len(ctx.chat_log) > 60:
                         ctx.chat_log = ctx.chat_log[-60:]
                 continue
+            kind = ev.get("kind")
+            if kind == "MATCH_START":
+                ctx.assets.play_sound("assets/sounds/initiate_deal.mp3", volume=0.65)
+                ctx.assets.play_music(["assets/sounds/bg_1.mp3", "assets/sounds/bg_3.mp3"], volume=0.22)
+            elif kind == "REACTION_START":
+                ctx.assets.play_sound("assets/sounds/cardplay_3.mp3", volume=0.7)
+            elif kind == "MATCH_END":
+                ctx.assets.play_sound("assets/sounds/cardplay_3.mp3", volume=0.55)
             ctx.toasts.append((_format_event(ev), now_t + 4.0))
         # Expire old toasts.
         ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]

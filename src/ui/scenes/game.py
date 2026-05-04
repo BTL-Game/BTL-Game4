@@ -41,6 +41,8 @@ COLOR_RGB = {
     Color.YELLOW: YELLOW,
 }
 
+_DEAL_OPP_DELAY = 80  # ms between opponent deal card animations
+
 
 class GameScene(Scene):
     def __init__(self, ctx: AppContext) -> None:
@@ -52,6 +54,7 @@ class GameScene(Scene):
         self.draw_btn = Button(pygame.Rect(24, SCREEN_H - 78, 160, 56), "DRAW")
         self.uno_btn = Button(pygame.Rect(SCREEN_W - 196, SCREEN_H - 86, 172, 72), "UNO!")
         self.react_btn = Button(pygame.Rect(SCREEN_W // 2 - 80, SCREEN_H // 2 + 110, 160, 54), "REACT!")
+        self.leave_btn = Button(pygame.Rect(24, 18, 72, 32), "LEAVE")
         self.effects: list[dict] = []
         self._last_effect_key = ""
         self.card_rects: list[tuple[int, pygame.Rect]] = []
@@ -60,6 +63,8 @@ class GameScene(Scene):
         self.dir_cw_rect = pygame.Rect(0, 0, 0, 0)
         self.dir_ccw_rect = pygame.Rect(0, 0, 0, 0)
         self.draw_pile_rect = pygame.Rect(0, 0, 0, 0)
+        self.sound_btn_rect = pygame.Rect(SCREEN_W - 78, 18, 30, 30)
+        self.music_btn_rect = pygame.Rect(SCREEN_W - 42, 18, 30, 30)
         # Chat UI
         self.chat_panel = pygame.Rect(SCREEN_W - 312, 84, 292, 260)
         self.chat_toggle_btn = Button(pygame.Rect(SCREEN_W - 58, 84, 42, 42), "💬")
@@ -69,12 +74,56 @@ class GameScene(Scene):
             self.chat_panel.width - 24,
             30,
         )
+        # Deal animation state
+        self._deal_active = False
+        self._deal_start_ms = 0
+        self._deal_hand_size = 0
+        self._deal_done = False
+        self._deal_opp_sizes: list[tuple[tuple[int, int], int]] = []  # (center_xy, n_cards)
+        # Track top card to spawn effects on opponent plays
+        self._last_top_card_code: str | None = None
 
     def update(self, dt: float) -> None:
         # Keep the temporary visual effects list small even if the window is idle.
         del dt
         now = pygame.time.get_ticks()
         self.effects = [fx for fx in self.effects if now - fx["created"] <= fx["duration"]]
+
+        view = self.ctx.current_view
+        if view is not None:
+            # Trigger deal animation once per game start.
+            if view.started and not self._deal_done and not self._deal_active:
+                n = len(view.self_hand)
+                if n > 0:
+                    self._deal_active = True
+                    self._deal_start_ms = now
+                    self._deal_hand_size = n
+                    # Gather opponent positions for their deal animation.
+                    others = [p for p in view.players if p.player_id != self.ctx.player_id]
+                    slots = []
+                    if len(others) == 1:
+                        slots = [(SCREEN_W // 2, 122)]
+                    elif len(others) == 2:
+                        slots = [(124, SCREEN_H // 2 - 38), (SCREEN_W - 124, SCREEN_H // 2 - 38)]
+                    elif len(others) >= 3:
+                        slots = [(124, SCREEN_H // 2 - 38), (SCREEN_W // 2, 122),
+                                 (SCREEN_W - 124, SCREEN_H // 2 - 38)]
+                    self._deal_opp_sizes = [(s, p.card_count) for s, p in zip(slots, others)]
+
+            # Expire deal animation.
+            if self._deal_active:
+                total_ms = (self._deal_hand_size - 1) * 120 + 400
+                if now - self._deal_start_ms > total_ms:
+                    self._deal_active = False
+                    self._deal_done = True
+
+            # Spawn effect when top card changes (catches opponent plays too).
+            top = view.top_card
+            top_code = top.code() if top is not None else None
+            if top_code != self._last_top_card_code:
+                if self._last_top_card_code is not None and top is not None:
+                    self._spawn_card_effect(top)
+                self._last_top_card_code = top_code
 
     # ------------------------------------------------------------------
     # input
@@ -84,7 +133,16 @@ class GameScene(Scene):
         if view is None:
             return
 
-        # Reaction event takes priority over everything else.
+        if self._handle_audio_toggle(event):
+            return
+
+        # Leave game button (always active).
+        if self.leave_btn.clicked(event):
+            if hasattr(self.ctx, "leave_game") and callable(self.ctx.leave_game):
+                self.ctx.leave_game()
+            return
+
+        # Reaction event takes priority over gameplay/chat input.
         if view.reaction_active:
             if self.react_btn.clicked(event):
                 self.ctx.assets.play_sound("assets/sounds/cardplay_3.mp3")
@@ -175,7 +233,10 @@ class GameScene(Scene):
         self._draw_effects(screen)
         self._draw_log(screen, view)
         self._draw_chat(screen)
-        self._draw_hand(screen, view)
+        if self._deal_active:
+            self._draw_deal_animation(screen, view)
+        else:
+            self._draw_hand(screen, view)
         self._draw_buttons(screen, view)
 
         # Modals on top.
@@ -270,11 +331,20 @@ class GameScene(Scene):
             x += width
             pygame.draw.line(screen, (255, 255, 255, 45), (x - 14, bar.y + 10), (x - 14, bar.bottom - 10), 1)
 
-        # Tiny sound/music status buttons. They are visual only; audio is controlled by pygame mixer.
-        for i, label in enumerate(("🔊", "♫")):
-            r = pygame.Rect(SCREEN_W - 78 + i * 36, 18, 30, 30)
-            pygame.draw.rect(screen, (42, 36, 72), r, border_radius=9)
-            screen.blit(self.font_b.render(label, True, TEXT), self.font_b.render(label, True, TEXT).get_rect(center=r.center))
+        # Sound/music toggle buttons – styled pill buttons.
+        audio_buttons = [
+            (self.sound_btn_rect, "🔊" if self.ctx.assets.sound_enabled else "🔇", self.ctx.assets.sound_enabled),
+            (self.music_btn_rect, "♫" if self.ctx.assets.music_enabled else "✕", self.ctx.assets.music_enabled),
+        ]
+        for r, label, active in audio_buttons:
+            hover = r.collidepoint(pygame.mouse.get_pos())
+            bg_on  = (55, 90, 55) if active else (90, 50, 50)
+            bg_hov = (75, 120, 75) if active else (120, 65, 65)
+            pygame.draw.rect(screen, bg_hov if hover else bg_on, r, border_radius=9)
+            border_col = (120, 220, 120) if active else (220, 120, 120)
+            pygame.draw.rect(screen, border_col, r, 2, border_radius=9)
+            txt = self.font_b.render(label, True, TEXT)
+            screen.blit(txt, txt.get_rect(center=r.center))
 
     def _draw_opponents(self, screen: pygame.Surface, view) -> None:
         others = [p for p in view.players if p.player_id != self.ctx.player_id]
@@ -420,15 +490,134 @@ class GameScene(Scene):
                 pygame.draw.rect(screen, ACCENT, rect.inflate(6, 6), 3, border_radius=14)
             self.card_rects.append((idx, rect))
 
+    def _draw_deal_animation(self, screen: pygame.Surface, view) -> None:
+        """Animate cards flying from the draw pile to the player's hand."""
+        now = pygame.time.get_ticks()
+        n = self._deal_hand_size
+        if n == 0:
+            return
+
+        FLIGHT_MS = 300
+        CARD_DELAY = 120
+
+        # Hand layout (mirrors _draw_hand).
+        max_w = SCREEN_W - 270
+        spacing = min(CARD_W + 10, max_w // max(1, n))
+        total_w = spacing * (n - 1) + CARD_W
+        x0 = (SCREEN_W - total_w) // 2
+        hand_y = SCREEN_H - CARD_H - 38
+
+        # Deck source centre.
+        cx_t, cy_t = SCREEN_W // 2, SCREEN_H // 2 - 6
+        deck_cx = cx_t - CARD_W - 42 + CARD_W // 2
+        deck_cy = cy_t
+
+        age = now - self._deal_start_ms
+
+        # Opponent cards – just 3 cards each, staggered earlier.
+        for (opp_cx, opp_cy), opp_n in self._deal_opp_sizes:
+            for k in range(min(opp_n, 4)):
+                opp_start = k * _DEAL_OPP_DELAY
+                if age < opp_start:
+                    break
+                card_age = age - opp_start
+                t = min(1.0, card_age / FLIGHT_MS)
+                t_e = 1 - (1 - t) ** 2
+                cur_cx = deck_cx + (opp_cx - deck_cx) * t_e
+                cur_cy = deck_cy + (opp_cy - deck_cy) * t_e
+                scale = 1.2 - 0.2 * t_e
+                w, h = int(CARD_W * scale * 0.55), int(CARD_H * scale * 0.55)
+                rect = pygame.Rect(0, 0, w, h)
+                rect.center = (int(cur_cx), int(cur_cy))
+                self._draw_card_shadow(screen, rect, alpha=int(60 * t_e))
+                screen.blit(self.ctx.assets.card_back((w, h)), rect)
+
+        # Player's own cards.
+        for i in range(n):
+            card_start = i * CARD_DELAY
+            if age < card_start:
+                break
+            card_age = age - card_start
+            t = min(1.0, card_age / FLIGHT_MS)
+            t_e = 1 - (1 - t) ** 2
+
+            dst_cx = x0 + i * spacing + CARD_W // 2
+            dst_cy = hand_y + CARD_H // 2
+
+            cur_cx = deck_cx + (dst_cx - deck_cx) * t_e
+            cur_cy = deck_cy + (dst_cy - deck_cy) * t_e
+
+            scale = 1.3 - 0.3 * t_e
+            w, h = int(CARD_W * scale), int(CARD_H * scale)
+            rect = pygame.Rect(0, 0, w, h)
+            rect.center = (int(cur_cx), int(cur_cy))
+            self._draw_card_shadow(screen, rect, alpha=int(90 * t_e))
+
+            if t >= 0.85 and i < len(view.self_hand):
+                # Flip reveal: last 15% of flight shows the actual card face.
+                flip_t = (t - 0.85) / 0.15
+                if flip_t < 0.5:
+                    # Squish to 0 (back side disappearing).
+                    draw_w = max(2, int(w * (1 - flip_t * 2)))
+                    back = self.ctx.assets.card_back((draw_w, h))
+                    br = pygame.Rect(0, 0, draw_w, h)
+                    br.center = rect.center
+                    screen.blit(back, br)
+                else:
+                    # Expand with face side.
+                    draw_w = max(2, int(w * ((flip_t - 0.5) * 2)))
+                    face = self.ctx.assets.card_surface(view.self_hand[i], (draw_w, h))
+                    fr = pygame.Rect(0, 0, draw_w, h)
+                    fr.center = rect.center
+                    screen.blit(face, fr)
+            else:
+                back = self.ctx.assets.card_back((w, h))
+                screen.blit(back, rect)
+
     def _draw_buttons(self, screen: pygame.Surface, view) -> None:
-        self.draw_btn.draw(screen, self.font_b)
-        uno_img = self.ctx.assets.image_first(["assets/buttons/UNO_button.png"], self.uno_btn.rect.size)
+        # ── DRAW button ─────────────────────────────────────────
+        draw_r = self.draw_btn.rect
+        hover_draw = draw_r.collidepoint(pygame.mouse.get_pos())
+        bg_col = (90, 115, 155) if hover_draw else (50, 75, 115)
+        pygame.draw.rect(screen, bg_col, draw_r, border_radius=14)
+        pygame.draw.rect(screen, (200, 220, 255), draw_r, 2, border_radius=14)
+        # Small card icon.
+        ic = pygame.Rect(draw_r.x + 10, draw_r.centery - 18, 24, 34)
+        pygame.draw.rect(screen, (245, 240, 220), ic, border_radius=5)
+        pygame.draw.rect(screen, (30, 30, 60), ic, 2, border_radius=5)
+        arrow = self.font_b.render("↓", True, (30, 30, 80))
+        screen.blit(arrow, arrow.get_rect(center=ic.center))
+        txt = self.font_b.render("DRAW", True, (245, 245, 235))
+        screen.blit(txt, txt.get_rect(midleft=(draw_r.x + 44, draw_r.centery)))
+
+        # ── UNO button ──────────────────────────────────────────
+        uno_img = self.ctx.assets.image_first([
+            "assets/buttons/UNO_button.png",
+            "assets/New folder/UNO_button.png",
+            "New folder/UNO_button.png",
+        ], self.uno_btn.rect.size)
         if uno_img is not None:
             screen.blit(uno_img, self.uno_btn.rect)
             if self.uno_btn.rect.collidepoint(pygame.mouse.get_pos()):
                 pygame.draw.rect(screen, ACCENT, self.uno_btn.rect.inflate(4, 4), 3, border_radius=22)
         else:
-            self.uno_btn.draw(screen, self.font_b)
+            # Stylised fallback.
+            ur = self.uno_btn.rect
+            hover_uno = ur.collidepoint(pygame.mouse.get_pos())
+            bg = (220, 50, 30) if hover_uno else (185, 30, 20)
+            pygame.draw.rect(screen, bg, ur, border_radius=20)
+            pygame.draw.rect(screen, YELLOW, ur, 3, border_radius=20)
+            uno_txt = self.font_big.render("UNO!", True, YELLOW)
+            screen.blit(uno_txt, uno_txt.get_rect(center=ur.center))
+
+        # ── LEAVE button ────────────────────────────────────────
+        lr = self.leave_btn.rect
+        hover_leave = lr.collidepoint(pygame.mouse.get_pos())
+        bg_l = (130, 50, 50) if hover_leave else (90, 35, 35)
+        pygame.draw.rect(screen, bg_l, lr, border_radius=9)
+        pygame.draw.rect(screen, (220, 160, 160), lr, 2, border_radius=9)
+        leave_txt = self.font.render("⏎ LEAVE", True, (245, 200, 200))
+        screen.blit(leave_txt, leave_txt.get_rect(center=lr.center))
 
     def _draw_log(self, screen: pygame.Surface, view) -> None:
         if not view.log:
@@ -472,6 +661,11 @@ class GameScene(Scene):
         if key == self._last_effect_key:
             return
         self._last_effect_key = key
+        # Play dedicated sound effect.
+        if kind == "plus4":
+            self.ctx.assets.play_sound("assets/sounds/wild_four_effect.mp3", volume=0.70)
+        elif kind == "plus2":
+            self.ctx.assets.play_sound("assets/sounds/carddraw_1.mp3", volume=0.65)
         self.effects.append({"kind": kind, "created": now, "duration": duration})
 
     def _draw_effects(self, screen: pygame.Surface) -> None:
@@ -486,15 +680,60 @@ class GameScene(Scene):
             t = max(0.0, min(1.0, age / fx["duration"]))
             kind = fx["kind"]
             if kind == "plus4":
-                self._draw_burst_effect(screen, "+4 CHAOS!", t, (255, 92, 235))
+                self._draw_image_effect(screen, "assets/effects/wild_four_effects.png",
+                                        t, "+4 CHAOS!", (255, 92, 235))
             elif kind == "plus2":
-                self._draw_burst_effect(screen, "+2", t, (80, 190, 255))
+                self._draw_image_effect(screen, "assets/effects/plus_two_effect.png",
+                                        t, "+2", (80, 190, 255))
             elif kind == "reverse":
                 self._draw_reverse_effect(screen, t)
             elif kind == "skip":
                 self._draw_burst_effect(screen, "NOPE!", t, (255, 220, 60))
             alive.append(fx)
         self.effects = alive
+
+    def _effect_alpha(self, t: float) -> int:
+        """Fade-in for first 20%, hold to 70%, fade-out to 100%."""
+        if t < 0.20:
+            return int(255 * (t / 0.20))
+        elif t > 0.70:
+            return int(255 * (1.0 - (t - 0.70) / 0.30))
+        return 255
+
+    def _draw_image_effect(self, screen: pygame.Surface, img_path: str,
+                            t: float, label: str, color) -> None:
+        """Draw an effect using the asset image with fade-in/fade-out."""
+        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 30
+        alpha = self._effect_alpha(t)
+
+        img = self.ctx.assets.image_first([img_path])
+        if img is not None:
+            # Scale: grows in (0.55→1.0 in first 30%), gentle bob.
+            if t < 0.30:
+                scale = 0.55 + 0.45 * (t / 0.30)
+            else:
+                scale = 1.0 + 0.04 * math.sin(t * math.tau * 2)
+            base_w, base_h = min(420, img.get_width()), min(260, img.get_height())
+            sw, sh = int(base_w * scale), int(base_h * scale)
+            scaled = pygame.transform.smoothscale(img, (sw, sh))
+            scaled.set_alpha(alpha)
+            screen.blit(scaled, scaled.get_rect(center=(cx, cy - 10)))
+        else:
+            # Fallback to procedural burst when image missing.
+            self._draw_burst_effect(screen, label, t, color)
+            return
+
+        # Text label below the image.
+        scale_txt = 1.0 + 0.18 * math.sin(t * math.pi)
+        fsize = int(44 * scale_txt)
+        font = pygame.font.SysFont("arialblack,arial", fsize, bold=True)
+        shadow = font.render(label, True, (0, 0, 0))
+        txt = font.render(label, True, color)
+        shadow.set_alpha(alpha)
+        txt.set_alpha(alpha)
+        lbl_cy = cy + 110
+        screen.blit(shadow, shadow.get_rect(center=(cx + 3, lbl_cy + 4)))
+        screen.blit(txt, txt.get_rect(center=(cx, lbl_cy)))
 
     def _draw_burst_effect(self, screen: pygame.Surface, label: str, t: float, color) -> None:
         cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 20
@@ -600,6 +839,26 @@ class GameScene(Scene):
         while trimmed and font.size(trimmed + "...")[0] > max_w:
             trimmed = trimmed[:-1]
         return (trimmed + "...") if trimmed else "..."
+
+
+    def _handle_audio_toggle(self, event: pygame.event.Event) -> bool:
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+        if self.sound_btn_rect.collidepoint(event.pos):
+            enabled = self.ctx.assets.toggle_sound()
+            if isinstance(self.ctx.toasts, list):
+                self.ctx.toasts.append(("Sound on" if enabled else "Sound off", time.monotonic() + 1.4))
+            if enabled:
+                self.ctx.assets.play_sound("assets/sounds/cardplay_1.mp3")
+            return True
+        if self.music_btn_rect.collidepoint(event.pos):
+            enabled = self.ctx.assets.toggle_music()
+            if enabled:
+                self.ctx.assets.play_music(["assets/sounds/bg_1.mp3", "assets/sounds/bg_3.mp3"], volume=0.12)
+            if isinstance(self.ctx.toasts, list):
+                self.ctx.toasts.append(("Music on" if enabled else "Music off", time.monotonic() + 1.4))
+            return True
+        return False
 
     def _handle_chat_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:

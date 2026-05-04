@@ -18,6 +18,10 @@ SYMBOL = {
 }
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ASSETS_ROOT = PROJECT_ROOT / "assets"
+
+
 class AssetManager:
     """Centralized image/sound loader with caching.
 
@@ -31,23 +35,42 @@ class AssetManager:
     - assets/sounds/*.mp3
     """
 
-    def __init__(self, base_dir: str = "assets/cards") -> None:
-        self.base = Path(base_dir)
-        self.assets_root = self.base.parent
+    def __init__(self, base_dir: str | Path | None = None) -> None:
+        # Resolve assets relative to the project root instead of the current
+        # terminal working directory. This fixes missing images/sounds when the
+        # game is launched as `python path/to/main.py` from another folder.
+        self.project_root = PROJECT_ROOT
+        self.assets_root = ASSETS_ROOT
+        self.base = self._resolve(base_dir or "assets/cards")
         self.cache: dict[str, object] = {}
+        self.sound_enabled = True
+        self.music_enabled = True
 
     # ------------------------------------------------------------------
     # generic loading helpers
     # ------------------------------------------------------------------
     def _resolve(self, path: str | Path) -> Path:
         p = Path(path)
-        if p.exists():
+        if p.is_absolute():
             return p
-        # Allow passing paths relative to assets/, for example "scenes/bg_1.jpg".
-        candidate = self.assets_root / p
-        if candidate.exists():
-            return candidate
-        return p
+
+        candidates: list[Path] = []
+        # Keep current-working-directory support for dev convenience.
+        candidates.append(Path.cwd() / p)
+        # Support paths written as "assets/...".
+        if p.parts and p.parts[0] == "assets":
+            candidates.append(self.project_root / p)
+            candidates.append(self.assets_root / Path(*p.parts[1:]))
+        else:
+            # Support paths relative to project root or directly to assets/.
+            candidates.append(self.project_root / p)
+            candidates.append(self.assets_root / p)
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        # Return the most likely intended absolute path for clearer errors/cache keys.
+        return candidates[1] if len(candidates) > 1 else p
 
     def first_existing(self, paths: Iterable[str | Path]) -> Path | None:
         for path in paths:
@@ -107,8 +130,18 @@ class AssetManager:
     # ------------------------------------------------------------------
     # sound helpers
     # ------------------------------------------------------------------
+    def ensure_audio(self) -> bool:
+        if pygame.mixer.get_init():
+            return True
+        try:
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            pygame.mixer.set_num_channels(16)
+            return True
+        except Exception:
+            return False
+
     def sound(self, path: str | Path) -> pygame.mixer.Sound | None:
-        if not pygame.mixer.get_init():
+        if not self.sound_enabled or not self.ensure_audio():
             return None
         resolved = self._resolve(path)
         key = f"snd:{resolved}"
@@ -125,6 +158,8 @@ class AssetManager:
         return snd
 
     def play_sound(self, *paths: str | Path, volume: float = 0.55) -> None:
+        if not self.sound_enabled:
+            return
         for path in paths:
             snd = self.sound(path)
             if snd is not None:
@@ -136,7 +171,7 @@ class AssetManager:
                 return
 
     def play_music(self, paths: Iterable[str | Path], volume: float = 0.25, loops: int = -1) -> None:
-        if not pygame.mixer.get_init():
+        if not self.music_enabled or not self.ensure_audio():
             return
         found = self.first_existing(paths)
         if found is None:
@@ -148,6 +183,34 @@ class AssetManager:
         except Exception:
             # Some machines/pygame builds may not support a particular codec.
             pass
+
+    def set_sound_enabled(self, enabled: bool) -> None:
+        self.sound_enabled = enabled
+        if not enabled and pygame.mixer.get_init():
+            try:
+                pygame.mixer.stop()
+            except Exception:
+                pass
+
+    def set_music_enabled(self, enabled: bool) -> None:
+        self.music_enabled = enabled
+        if not pygame.mixer.get_init():
+            return
+        try:
+            if enabled:
+                pygame.mixer.music.unpause()
+            else:
+                pygame.mixer.music.pause()
+        except Exception:
+            pass
+
+    def toggle_sound(self) -> bool:
+        self.set_sound_enabled(not self.sound_enabled)
+        return self.sound_enabled
+
+    def toggle_music(self) -> bool:
+        self.set_music_enabled(not self.music_enabled)
+        return self.music_enabled
 
     # ------------------------------------------------------------------
     # card loading
