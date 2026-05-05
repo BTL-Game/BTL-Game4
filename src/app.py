@@ -115,7 +115,18 @@ def _format_event(ev: dict) -> str:
 
 def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
             initial_name: str = "") -> None:
+    pygame.mixer.pre_init(44100, -16, 2, 512)
     pygame.init()
+    MUSIC_END_EVENT = pygame.USEREVENT + 1
+    _intro_done = False
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+        pygame.mixer.set_num_channels(16)
+        pygame.mixer.music.set_endevent(MUSIC_END_EVENT)
+    except Exception:
+        # Keep the game playable on machines without an audio device.
+        pass
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     pygame.display.set_caption("Custom UNO Online")
     clock = pygame.time.Clock()
@@ -139,6 +150,7 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
     probe.start()
 
     ctx = AppContext(network=None, assets=AssetManager())
+    ctx.assets.play_music(["assets/sounds/intro_1.mp3"], volume=0.20, loops=0)
     ctx.player_name = initial_name
     ctx.server_address = ""
     ctx.current_view = None
@@ -239,6 +251,8 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         ctx.room_code = ""
         go_browser()
 
+    ctx.leave_game = leave_lobby
+
     def on_state(player_id, view) -> None:
         # In socket mode there's exactly one local player; just record their view.
         ctx.views_by_player[player_id] = view
@@ -277,6 +291,14 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
                         if len(ctx.chat_log) > 60:
                             ctx.chat_log = ctx.chat_log[-60:]
                     continue
+                kind = ev.get("kind")
+                if kind == "MATCH_START":
+                    ctx.assets.play_sound("assets/sounds/initiate_deal.mp3", volume=0.65)
+                    ctx.assets.play_music(["assets/sounds/bg_1.mp3", "assets/sounds/bg_3.mp3"], volume=0.12)
+                elif kind == "REACTION_START":
+                    ctx.assets.play_sound("assets/sounds/cardplay_3.mp3", volume=0.70)
+                elif kind == "MATCH_END":
+                    ctx.assets.play_sound("assets/sounds/cardplay_3.mp3", volume=0.55)
                 ctx.toasts.append((_format_event(ev), now_t + 4.0))
             ctx.toasts = [(t, exp) for (t, exp) in ctx.toasts if exp > now_t]
 
@@ -306,6 +328,13 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+                continue
+            if event.type == MUSIC_END_EVENT and not _intro_done:
+                _intro_done = True
+                ctx.assets.play_music(
+                    ["assets/sounds/bg_1.mp3", "assets/sounds/bg_3.mp3"],
+                    volume=0.12,
+                )
                 continue
             scene_manager.current.handle_event(event)
 
