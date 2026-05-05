@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from src.core.actions import LeaveRoom, AddBot, DrawCard
 from src.core.engine import GameEngine
+from src.core.modes import MODE_BASIC, MODE_ASIAN, VALID_MODES
 from src.core.game_state import to_view
 from src.network.codec import action_from_json, view_to_json
 from src.ai.simple_bot import SimpleBot
@@ -167,6 +168,7 @@ class Room:
             "n_players": self.n_players,
             "max_players": 4,
             "started": self.started,
+            "mode": self.engine.state.mode,
         }
 
     def broadcast_state(self) -> None:
@@ -506,9 +508,13 @@ class Server:
             conn.send_envelope("ERROR", {"msg": "server room limit reached"})
             return
         name = _sanitize_name(payload.get("name")) or "Player"
+        mode_raw = payload.get("mode", MODE_BASIC)
+        mode = mode_raw if isinstance(mode_raw, str) else MODE_BASIC
+        if mode not in VALID_MODES:
+            mode = MODE_BASIC
         host_id = uuid4().hex[:8]
         engine = GameEngine()
-        engine.create_room(host_id, name)
+        engine.create_room(host_id, name, mode=mode)
         # Override the engine's auto-generated code with one unique to this server.
         code = self._gen_room_code()
         engine.state.room_code = code

@@ -102,8 +102,8 @@ class SocketClientNetwork:
     # ------------------------------------------------------------------
     # NetworkInterface
     # ------------------------------------------------------------------
-    def host_room(self, player_name: str) -> str:
-        self._send("CREATE_ROOM", {"name": player_name})
+    def host_room(self, player_name: str, mode: str = "basic") -> str:
+        self._send("CREATE_ROOM", {"name": player_name, "mode": mode})
         return ""  # actual id arrives async via JOINED
 
     def join_room(self, room_code: str, player_name: str) -> str:

@@ -9,6 +9,9 @@ from src.core.actions import (
     ChooseDirection,
     ChooseTarget,
     DrawCard,
+    EndTurn,
+    HoldBomb,
+    PassBomb,
     PlayCard,
     Reaction,
 )
@@ -21,9 +24,11 @@ class SimpleBot:
         time.sleep(random.uniform(min_seconds, max_seconds))
 
     def choose_action(self, view: GameStateView, my_id: str, delay: bool = True) -> object:
-        del my_id
         if delay:
             self._think()
+        if getattr(view, "mode", "basic") == "asian":
+            return self._choose_action_asian(view, my_id)
+        del my_id
         if not view.self_hand:
             return DrawCard()
 
@@ -46,6 +51,23 @@ class SimpleBot:
                 return PlayCard(hand_index=number_idx)
             idx = playable_indices[0]
             return PlayCard(hand_index=idx)
+
+        return DrawCard()
+
+    def _choose_action_asian(self, view: GameStateView, my_id: str) -> object:
+        if view.bomb_decision_player_id == my_id:
+            # Randomly hold or pass; pass adds a card but moves bomb onward.
+            return PassBomb() if random.random() < 0.55 else HoldBomb()
+
+        playable_indices = [idx for idx, card in enumerate(view.self_hand) if self._is_legal_play_asian(view, card)]
+        if view.turn_play_count > 0:
+            if not playable_indices or view.turn_play_count >= max(1, view.turn_play_limit - 1):
+                return EndTurn()
+            if random.random() < 0.35:
+                return EndTurn()
+
+        if playable_indices:
+            return PlayCard(hand_index=playable_indices[0])
 
         return DrawCard()
 
@@ -84,6 +106,20 @@ class SimpleBot:
         ):
             return True
 
+        return False
+
+    def _is_legal_play_asian(self, view: GameStateView, card: Card) -> bool:
+        if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
+            return False
+        if getattr(view, "turn_color", None) is not None and card.color == view.turn_color:
+            return True
+        top = view.top_card
+        if top is None:
+            return True
+        if card.card_type == CardType.NUMBER and top.card_type == CardType.NUMBER and card.value == top.value:
+            return True
+        if card.card_type == top.card_type and card.card_type != CardType.NUMBER:
+            return True
         return False
 
     def _find_stacking_card(self, view: GameStateView, playable_indices: list[int]) -> int | None:

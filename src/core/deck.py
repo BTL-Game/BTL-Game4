@@ -22,6 +22,20 @@ def build_standard_uno_deck() -> list[Card]:
     return deck
 
 
+def build_asian_uno_deck() -> list[Card]:
+    """UNO deck without Wild / Wild Draw Four cards."""
+    deck: list[Card] = []
+    for color in [Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW]:
+        for value in range(10):
+            copies = 1 if value == 0 else 2
+            for _ in range(copies):
+                deck.append(Card(color=color, card_type=CardType.NUMBER, value=value))
+        for action_type in [CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO]:
+            for _ in range(2):
+                deck.append(Card(color=color, card_type=action_type))
+    return deck
+
+
 @dataclass
 class Deck:
     cards: list[Card] = field(default_factory=build_standard_uno_deck)

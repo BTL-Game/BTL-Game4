@@ -36,6 +36,18 @@ def _friendly_reason(reason: str) -> str:
         return "Not your turn"
     if "invalid card index" in low:
         return "Invalid card"
+    if "resolve bomb" in low:
+        return "Resolve bomb first"
+    if "turn play limit" in low:
+        return "Turn limit reached"
+    if "end your turn" in low:
+        return "End your turn"
+    if "play a card or draw" in low:
+        return "Play a card or draw"
+    if "must draw" in low:
+        return "Must draw when no playable card"
+    if "cannot draw after playing" in low:
+        return "Cannot draw after playing"
     return r
 
 
@@ -220,11 +232,11 @@ def run_app(server_host: str = "127.0.0.1", server_port: int = 5555,
             LobbyBrowserScene(ctx, on_create=do_create, on_join=do_join, on_back=go_menu)
         )
 
-    def do_create() -> None:
+    def do_create(mode: str) -> None:
         if network is None:
             return
         ctx.error = ""
-        network.host_room(ctx.player_name or "Player")
+        network.host_room(ctx.player_name or "Player", mode=mode)
 
     def do_join(code: str) -> None:
         if network is None:

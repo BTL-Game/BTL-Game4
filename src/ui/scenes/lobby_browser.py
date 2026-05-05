@@ -46,6 +46,9 @@ class LobbyBrowserScene(Scene):
         self.refresh_btn = Button(pygame.Rect(cx + 120, SCREEN_H - 90, 130, 50), "REFRESH")
         self.back_btn = Button(pygame.Rect(20, SCREEN_H - 60, 100, 40), "BACK")
         self.code_box = pygame.Rect(cx - 120, SCREEN_H - 150, 240, 40)
+        self.mode_basic_btn = Button(pygame.Rect(cx - 320, SCREEN_H - 200, 150, 40), "BASIC")
+        self.mode_asian_btn = Button(pygame.Rect(cx - 160, SCREEN_H - 200, 150, 40), "ASIAN")
+        self.mode: str = "basic"
 
         self._row_rects: list[tuple[str, pygame.Rect]] = []
         # Auto-request initial list.
@@ -63,7 +66,13 @@ class LobbyBrowserScene(Scene):
             self._on_back()
             return
         if self.create_btn.clicked(event):
-            self._on_create()
+            self._on_create(self.mode)
+            return
+        if self.mode_basic_btn.clicked(event):
+            self.mode = "basic"
+            return
+        if self.mode_asian_btn.clicked(event):
+            self.mode = "asian"
             return
         if self.refresh_btn.clicked(event):
             self._request_list()
@@ -124,8 +133,9 @@ class LobbyBrowserScene(Scene):
         hy = panel.y + 50
         screen.blit(self.tiny.render("CODE", True, MUTED), (panel.x + 16, hy))
         screen.blit(self.tiny.render("HOST", True, MUTED), (panel.x + 130, hy))
-        screen.blit(self.tiny.render("PLAYERS", True, MUTED), (panel.x + 380, hy))
-        screen.blit(self.tiny.render("STATUS", True, MUTED), (panel.x + 500, hy))
+        screen.blit(self.tiny.render("PLAYERS", True, MUTED), (panel.x + 320, hy))
+        screen.blit(self.tiny.render("MODE", True, MUTED), (panel.x + 450, hy))
+        screen.blit(self.tiny.render("STATUS", True, MUTED), (panel.x + 560, hy))
 
         self._row_rects.clear()
         if not rooms:
@@ -146,10 +156,12 @@ class LobbyBrowserScene(Scene):
                 screen.blit(self.small.render(r["host_name"], True, TEXT), (panel.x + 130, row_y + 2))
                 screen.blit(
                     self.small.render(f"{r['n_players']}/{r['max_players']}", True, TEXT),
-                    (panel.x + 390, row_y + 2),
+                    (panel.x + 330, row_y + 2),
                 )
+                mode = str(r.get("mode", "basic"))
+                screen.blit(self.small.render(mode, True, MUTED), (panel.x + 450, row_y + 2))
                 status = "started" if r["started"] else "waiting"
-                screen.blit(self.small.render(status, True, MUTED), (panel.x + 500, row_y + 2))
+                screen.blit(self.small.render(status, True, MUTED), (panel.x + 560, row_y + 2))
                 self._row_rects.append((r["code"], row_rect))
                 row_y += 40
 
@@ -165,6 +177,15 @@ class LobbyBrowserScene(Scene):
         self.join_btn.draw(screen, self.font)
         self.refresh_btn.draw(screen, self.font)
         self.back_btn.draw(screen, self.small)
+
+        # Mode selector.
+        screen.blit(self.small.render("Mode:", True, TEXT), (self.mode_basic_btn.rect.x - 60, self.mode_basic_btn.rect.y + 10))
+        self.mode_basic_btn.draw(screen, self.small)
+        self.mode_asian_btn.draw(screen, self.small)
+        if self.mode == "basic":
+            pygame.draw.rect(screen, ACCENT, self.mode_basic_btn.rect.inflate(6, 6), 2, border_radius=10)
+        else:
+            pygame.draw.rect(screen, ACCENT, self.mode_asian_btn.rect.inflate(6, 6), 2, border_radius=10)
 
         if self.ctx.error:
             err = self.small.render(self.ctx.error, True, (255, 110, 110))

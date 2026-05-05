@@ -10,7 +10,10 @@ from src.core.actions import (
     ChooseDirection,
     ChooseTarget,
     DrawCard,
+    EndTurn,
+    HoldBomb,
     PlayCard,
+    PassBomb,
     Reaction,
     DeclareUno,
 )
@@ -53,8 +56,11 @@ class GameScene(Scene):
         self.font_big = pygame.font.SysFont("arial", 30, bold=True)
         self.font_huge = pygame.font.SysFont("arialblack,arial", 48, bold=True)
         self.draw_btn = Button(pygame.Rect(24, SCREEN_H - 78, 160, 56), "DRAW")
+        self.end_turn_btn = Button(pygame.Rect(200, SCREEN_H - 78, 160, 56), "END TURN")
         self.uno_btn = Button(pygame.Rect(SCREEN_W - 196, SCREEN_H - 86, 172, 72), "UNO!")
         self.react_btn = Button(pygame.Rect(SCREEN_W // 2 - 80, SCREEN_H // 2 + 110, 160, 54), "REACT!")
+        self.hold_bomb_btn = Button(pygame.Rect(SCREEN_W // 2 - 170, SCREEN_H // 2 + 120, 150, 52), "HOLD")
+        self.pass_bomb_btn = Button(pygame.Rect(SCREEN_W // 2 + 20, SCREEN_H // 2 + 120, 150, 52), "PASS")
         self.leave_btn = Button(pygame.Rect(24, 18, 72, 32), "LEAVE")
         self.effects: list[dict] = []
         self._last_effect_key = ""
@@ -92,6 +98,25 @@ class GameScene(Scene):
         """Check if the player has at least one playable card in their hand."""
         try:
             if view is None or view.self_hand is None or view.top_card is None:
+                return False
+            if getattr(view, "mode", "basic") == "asian":
+                turn_color = getattr(view, "turn_color", None)
+                for card in view.self_hand:
+                    if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
+                        continue
+                    if turn_color is not None and card.color == turn_color:
+                        return True
+                    top = view.top_card
+                    if top is None:
+                        return True
+                    if (
+                        card.card_type == CardType.NUMBER
+                        and top.card_type == CardType.NUMBER
+                        and card.value == top.value
+                    ):
+                        return True
+                    if card.card_type == top.card_type and card.card_type != CardType.NUMBER:
+                        return True
                 return False
             for card in view.self_hand:
                 if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
@@ -176,6 +201,16 @@ class GameScene(Scene):
                 self.ctx.network.send(self.ctx.player_id, Reaction())
             return
 
+        # Bomb decision (Asian mode) takes priority.
+        if getattr(view, "mode", "basic") == "asian" and view.bomb_decision_player_id == self.ctx.player_id:
+            if self.hold_bomb_btn.clicked(event):
+                self.ctx.network.send(self.ctx.player_id, HoldBomb())
+                return
+            if self.pass_bomb_btn.clicked(event):
+                self.ctx.network.send(self.ctx.player_id, PassBomb())
+                return
+            return
+
         # Color picker modal.
         if view.awaiting_color_for_player == self.ctx.player_id:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -225,6 +260,9 @@ class GameScene(Scene):
         if self.draw_btn.clicked(event):
             self._play_draw_sound()
             self.ctx.network.send(self.ctx.player_id, DrawCard())
+            return
+        if getattr(view, "mode", "basic") == "asian" and self.end_turn_btn.clicked(event):
+            self.ctx.network.send(self.ctx.player_id, EndTurn())
             return
         if self.uno_btn.clicked(event):
             self.ctx.assets.play_sound("assets/sounds/cardplay_3.mp3")
@@ -289,6 +327,8 @@ class GameScene(Scene):
         # Modals on top.
         if view.reaction_active:
             self._draw_reaction(screen, view)
+        elif getattr(view, "mode", "basic") == "asian" and view.bomb_decision_player_id == self.ctx.player_id:
+            self._draw_bomb_decision(screen, view)
         elif view.awaiting_color_for_player == self.ctx.player_id:
             self._draw_color_picker(screen)
         elif view.awaiting_direction_for_player == self.ctx.player_id:
@@ -350,17 +390,35 @@ class GameScene(Scene):
         you_turn = view.turn_player_id == self.ctx.player_id
         dir_icon = "↻" if view.direction == 1 else "↺"
         dir_str = "CLOCKWISE" if view.direction == 1 else "COUNTER"
-        col = view.current_color.value.upper() if view.current_color else "—"
-        col_rgb = COLOR_RGB.get(view.current_color, MUTED)
+        mode = getattr(view, "mode", "basic")
+        col_src = view.turn_color if mode == "asian" else view.current_color
+        col = col_src.value.upper() if col_src else "—"
+        col_rgb = COLOR_RGB.get(col_src, MUTED)
 
         items = [
-            ("ROOM", view.room_code, 118),
-            ("TURN", "YOU" if you_turn else turn_name, 150),
-            ("DIR", f"{dir_icon} {dir_str}", 150),
-            ("COLOR", col, 120),
-            ("PENDING", f"+{view.pending_penalty}", 130),
-            ("DECK", str(view.draw_count), 88),
+            ("ROOM", view.room_code, 90),
+            ("TURN", "YOU" if you_turn else turn_name, 130),
+            ("DIR", f"{dir_icon} {dir_str}", 120),
         ]
+        if mode == "asian":
+            items.extend([
+                ("MODE", "ASIAN", 90),
+                ("TURN COLOR", col, 140),
+                ("PLAYS", f"{view.turn_play_count}/{view.turn_play_limit}", 90),
+            ])
+            if view.bomb_holder_id:
+                if view.bomb_holder_id == self.ctx.player_id:
+                    bomb_val = f"YOU {view.bomb_countdown}/{view.bomb_penalty}"
+                else:
+                    bomb_val = "ACTIVE"
+                items.append(("BOMB", bomb_val, 120))
+            items.append(("DECK", str(view.draw_count), 70))
+        else:
+            items.extend([
+                ("COLOR", col, 120),
+                ("PENDING", f"+{view.pending_penalty}", 130),
+                ("DECK", str(view.draw_count), 88),
+            ])
         x = bar.x + 18
         for label, value, width in items:
             label_surf = self.font.render(label, True, (190, 170, 255))
@@ -369,7 +427,7 @@ class GameScene(Scene):
             if label == "PENDING" and view.pending_penalty:
                 value_color = (255, 115, 230)
             value_surf = self.font_b.render(value, True, value_color)
-            if label == "COLOR":
+            if label in ("COLOR", "TURN COLOR"):
                 pygame.draw.circle(screen, col_rgb, (x + 18, bar.y + 38), 13)
                 pygame.draw.circle(screen, TEXT, (x + 18, bar.y + 38), 13, 2)
                 screen.blit(value_surf, (x + 38, bar.y + 29))
@@ -644,6 +702,16 @@ class GameScene(Scene):
         screen.blit(arrow, arrow.get_rect(center=ic.center))
         txt = self.font_b.render("DRAW", True, (245, 245, 235))
         screen.blit(txt, txt.get_rect(midleft=(draw_r.x + 44, draw_r.centery)))
+
+        # ── END TURN button (Asian mode) ───────────────────────
+        if getattr(view, "mode", "basic") == "asian":
+            er = self.end_turn_btn.rect
+            hover_end = er.collidepoint(pygame.mouse.get_pos())
+            bg_e = (85, 95, 125) if hover_end else (45, 55, 80)
+            pygame.draw.rect(screen, bg_e, er, border_radius=14)
+            pygame.draw.rect(screen, (210, 220, 240), er, 2, border_radius=14)
+            end_txt = self.font_b.render("END TURN", True, (245, 245, 235))
+            screen.blit(end_txt, end_txt.get_rect(center=er.center))
 
         # ── UNO button ──────────────────────────────────────────
         uno_img = self.ctx.assets.image_first([
@@ -1036,3 +1104,15 @@ class GameScene(Scene):
         name = next((p.name for p in view.players if p.player_id == who), who)
         rect = self._modal_panel(screen, 420, 120, f"Waiting for {name}...")
         del rect
+
+    def _draw_bomb_decision(self, screen, view) -> None:
+        overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        screen.blit(overlay, (0, 0))
+        rect = self._modal_panel(screen, 520, 220, "Bomb in hand")
+        info = self.font_b.render(
+            f"Countdown: {view.bomb_countdown}  |  Penalty: {view.bomb_penalty}", True, (24, 24, 24)
+        )
+        screen.blit(info, info.get_rect(center=(rect.centerx, rect.top + 90)))
+        self.hold_bomb_btn.draw(screen, self.font_b)
+        self.pass_bomb_btn.draw(screen, self.font_b)

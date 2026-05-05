@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 
 from .cards import Card, Color
+from .modes import MODE_BASIC
 from .deck import Deck
 from .player import Player
 
@@ -43,11 +44,16 @@ class GameState:
     hands: dict[str, list[Card]] = field(default_factory=dict)
     draw_pile: Deck = field(default_factory=Deck)
     discard_pile: list[Card] = field(default_factory=list)
+    mode: str = MODE_BASIC
     started: bool = False
     ended: bool = False
     winner_id: str | None = None
     turn_index: int = 0
     direction: int = 1
+    turn_color: Color | None = None
+    turn_play_count: int = 0
+    turn_play_limit: int = 3
+    turn_action_card: Card | None = None
     pending_penalty: int = 0
     pending_penalty_min: int = 0
     current_color: Color | None = None
@@ -60,6 +66,12 @@ class GameState:
     reaction_event: ReactionEvent = field(default_factory=ReactionEvent)
     uno_declared: dict[str, bool] = field(default_factory=dict)
     room_code: str = "ABCD"
+    # Bomb pass (Asian mode)
+    bomb_holder_id: str | None = None
+    bomb_countdown: int = 0
+    bomb_penalty: int = 0
+    bomb_spawn_in: int = 0
+    bomb_decision_player_id: str | None = None
 
     def player_ids(self) -> list[str]:
         return [p.player_id for p in self.players]
@@ -93,8 +105,11 @@ class GameStateView:
     self_hand: list[Card]
     top_card: Card | None
     current_color: Color | None
+    turn_color: Color | None
     turn_player_id: str | None
     direction: int
+    turn_play_count: int
+    turn_play_limit: int
     pending_penalty: int
     pending_penalty_min: int
     started: bool
@@ -102,6 +117,7 @@ class GameStateView:
     winner_id: str | None
     draw_count: int
     room_code: str
+    mode: str
     awaiting_color_for_player: str | None
     awaiting_direction_for_player: str | None
     awaiting_target_for_player: str | None
@@ -110,6 +126,10 @@ class GameStateView:
     reaction_time_left: float
     reaction_responded_ids: list[str]
     log: list[str]
+    bomb_holder_id: str | None
+    bomb_countdown: int
+    bomb_penalty: int
+    bomb_decision_player_id: str | None
 
 
 def to_view(state: GameState, self_player_id: str, log: list[str]) -> GameStateView:
@@ -133,8 +153,11 @@ def to_view(state: GameState, self_player_id: str, log: list[str]) -> GameStateV
         self_hand=list(state.hands.get(self_player_id, [])),
         top_card=state.top_card,
         current_color=state.current_color,
+        turn_color=state.turn_color,
         turn_player_id=state.current_player_id(),
         direction=state.direction,
+        turn_play_count=state.turn_play_count,
+        turn_play_limit=state.turn_play_limit,
         pending_penalty=state.pending_penalty,
         pending_penalty_min=state.pending_penalty_min,
         started=state.started,
@@ -142,6 +165,7 @@ def to_view(state: GameState, self_player_id: str, log: list[str]) -> GameStateV
         winner_id=state.winner_id,
         draw_count=len(state.draw_pile),
         room_code=state.room_code,
+        mode=state.mode,
         awaiting_color_for_player=state.awaiting_color_for_player,
         awaiting_direction_for_player=state.awaiting_direction_for_player,
         awaiting_target_for_player=state.awaiting_target_for_player,
@@ -150,4 +174,8 @@ def to_view(state: GameState, self_player_id: str, log: list[str]) -> GameStateV
         reaction_time_left=state.reaction_event.time_left(),
         reaction_responded_ids=list(state.reaction_event.responses.keys()),
         log=list(log[-8:]),
+        bomb_holder_id=state.bomb_holder_id,
+        bomb_countdown=state.bomb_countdown,
+        bomb_penalty=state.bomb_penalty,
+        bomb_decision_player_id=state.bomb_decision_player_id,
     )

@@ -21,6 +21,9 @@ from src.core.actions import (
     Reaction,
     DeclareUno,
     StartMatch,
+    EndTurn,
+    HoldBomb,
+    PassBomb,
 )
 from src.core.cards import Card, CardType, Color
 from src.core.game_state import GameStateView, PublicPlayerView
@@ -77,8 +80,11 @@ def view_to_json(v: GameStateView) -> dict[str, Any]:
         "self_hand": [card_to_json(c) for c in v.self_hand],
         "top_card": card_to_json(v.top_card),
         "current_color": v.current_color.value if v.current_color else None,
+        "turn_color": v.turn_color.value if v.turn_color else None,
         "turn_player_id": v.turn_player_id,
         "direction": v.direction,
+        "turn_play_count": v.turn_play_count,
+        "turn_play_limit": v.turn_play_limit,
         "pending_penalty": v.pending_penalty,
         "pending_penalty_min": v.pending_penalty_min,
         "started": v.started,
@@ -86,6 +92,7 @@ def view_to_json(v: GameStateView) -> dict[str, Any]:
         "winner_id": v.winner_id,
         "draw_count": v.draw_count,
         "room_code": v.room_code,
+        "mode": v.mode,
         "awaiting_color_for_player": v.awaiting_color_for_player,
         "awaiting_direction_for_player": v.awaiting_direction_for_player,
         "awaiting_target_for_player": v.awaiting_target_for_player,
@@ -94,6 +101,10 @@ def view_to_json(v: GameStateView) -> dict[str, Any]:
         "reaction_time_left": v.reaction_time_left,
         "reaction_responded_ids": list(v.reaction_responded_ids),
         "log": list(v.log),
+        "bomb_holder_id": v.bomb_holder_id,
+        "bomb_countdown": v.bomb_countdown,
+        "bomb_penalty": v.bomb_penalty,
+        "bomb_decision_player_id": v.bomb_decision_player_id,
     }
 
 
@@ -104,8 +115,11 @@ def view_from_json(d: dict[str, Any]) -> GameStateView:
         self_hand=[card_from_json(c) for c in d["self_hand"]],
         top_card=card_from_json(d.get("top_card")),
         current_color=Color(d["current_color"]) if d.get("current_color") else None,
+        turn_color=Color(d["turn_color"]) if d.get("turn_color") else None,
         turn_player_id=d.get("turn_player_id"),
         direction=d["direction"],
+        turn_play_count=d.get("turn_play_count", 0),
+        turn_play_limit=d.get("turn_play_limit", 3),
         pending_penalty=d["pending_penalty"],
         pending_penalty_min=d["pending_penalty_min"],
         started=d["started"],
@@ -113,6 +127,7 @@ def view_from_json(d: dict[str, Any]) -> GameStateView:
         winner_id=d.get("winner_id"),
         draw_count=d["draw_count"],
         room_code=d["room_code"],
+        mode=d.get("mode", "basic"),
         awaiting_color_for_player=d.get("awaiting_color_for_player"),
         awaiting_direction_for_player=d.get("awaiting_direction_for_player"),
         awaiting_target_for_player=d.get("awaiting_target_for_player"),
@@ -121,6 +136,10 @@ def view_from_json(d: dict[str, Any]) -> GameStateView:
         reaction_time_left=d["reaction_time_left"],
         reaction_responded_ids=list(d.get("reaction_responded_ids", [])),
         log=list(d.get("log", [])),
+        bomb_holder_id=d.get("bomb_holder_id"),
+        bomb_countdown=d.get("bomb_countdown", 0),
+        bomb_penalty=d.get("bomb_penalty", 0),
+        bomb_decision_player_id=d.get("bomb_decision_player_id"),
     )
 
 
@@ -150,6 +169,12 @@ def action_to_json(action: object) -> dict[str, Any]:
         return {"action_type": "KickPlayer", "target_player_id": action.target_player_id}
     if isinstance(action, AddBot):
         return {"action_type": "AddBot"}
+    if isinstance(action, EndTurn):
+        return {"action_type": "EndTurn"}
+    if isinstance(action, HoldBomb):
+        return {"action_type": "HoldBomb"}
+    if isinstance(action, PassBomb):
+        return {"action_type": "PassBomb"}
     raise ValueError(f"Unknown action type: {type(action).__name__}")
 
 
@@ -177,4 +202,10 @@ def action_from_json(d: dict[str, Any]) -> object:
         return KickPlayer(target_player_id=str(d["target_player_id"]))
     if t == "AddBot":
         return AddBot()
+    if t == "EndTurn":
+        return EndTurn()
+    if t == "HoldBomb":
+        return HoldBomb()
+    if t == "PassBomb":
+        return PassBomb()
     raise ValueError(f"Unknown action_type: {t!r}")

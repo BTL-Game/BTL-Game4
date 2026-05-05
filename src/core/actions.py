@@ -58,3 +58,18 @@ class KickPlayer:
 @dataclass(frozen=True)
 class AddBot:
     pass
+
+
+@dataclass(frozen=True)
+class EndTurn:
+    pass
+
+
+@dataclass(frozen=True)
+class HoldBomb:
+    pass
+
+
+@dataclass(frozen=True)
+class PassBomb:
+    pass

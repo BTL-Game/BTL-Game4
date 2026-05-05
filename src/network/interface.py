@@ -6,7 +6,7 @@ from src.core.game_state import GameStateView
 
 
 class NetworkInterface(Protocol):
-    def host_room(self, player_name: str) -> str:
+    def host_room(self, player_name: str, mode: str = "basic") -> str:
         ...
 
     def join_room(self, room_code: str, player_name: str) -> str:

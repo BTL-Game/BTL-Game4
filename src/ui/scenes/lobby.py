@@ -87,6 +87,8 @@ class LobbyScene(Scene):
             self.small.render(f"You are: {'HOST' if is_host else 'GUEST'}", True, TEXT),
             (40, 60),
         )
+        mode = getattr(view, "mode", "basic")
+        screen.blit(self.small.render(f"Mode: {mode}", True, TEXT), (40, 85))
 
         title = self.font.render(f"Players ({len(view.players)}/4)", True, TEXT)
         screen.blit(title, title.get_rect(center=(SCREEN_W // 2, 130)))

@@ -19,9 +19,9 @@ class LocalNetwork:
         self.bots: dict[str, SimpleBot] = {}
         self.bot_ready_at: dict[tuple[str, str], float] = {}
 
-    def host_room(self, player_name: str) -> str:
+    def host_room(self, player_name: str, mode: str = "basic") -> str:
         player_id = uuid4().hex[:8]
-        self.engine.create_room(player_id, player_name)
+        self.engine.create_room(player_id, player_name, mode=mode)
         self._broadcast_all()
         return player_id
 
