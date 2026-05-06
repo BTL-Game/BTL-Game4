@@ -87,8 +87,14 @@ class GameScene(Scene):
         self._deal_hand_size = 0
         self._deal_done = False
         self._deal_opp_sizes: list[tuple[tuple[int, int], int]] = []  # (center_xy, n_cards)
-        # Track top card to spawn effects on opponent plays
+        # Track real state changes so sounds/effects only run after the engine accepts a play.
         self._last_top_card_code: str | None = None
+        self._last_log_snapshot: tuple[str, ...] | None = None
+        self._last_player_card_counts: dict[str, int] = {}
+        self._last_turn_player_id: str | None = None
+
+        # Flying card overlays used to show who just played which card.
+        self.play_animations: list[dict] = []
 
         # Local UNO declaration state (client-side indicator)
         self.uno_declared: bool = False
@@ -140,6 +146,10 @@ class GameScene(Scene):
         del dt
         now = pygame.time.get_ticks()
         self.effects = [fx for fx in self.effects if now - fx["created"] <= fx["duration"]]
+        self.play_animations = [
+            anim for anim in self.play_animations
+            if now - anim["created"] <= anim["duration"]
+        ]
 
         view = self.ctx.current_view
         if view is not None:
@@ -169,13 +179,8 @@ class GameScene(Scene):
                     self._deal_active = False
                     self._deal_done = True
 
-            # Spawn effect when top card changes (catches opponent plays too).
-            top = view.top_card
-            top_code = top.code() if top is not None else None
-            if top_code != self._last_top_card_code:
-                if self._last_top_card_code is not None and top is not None:
-                    self._spawn_card_effect(top)
-                self._last_top_card_code = top_code
+            # Spawn play visuals/sounds from accepted engine state, not from raw clicks.
+            self._sync_play_feedback(view)
 
     # ------------------------------------------------------------------
     # input
@@ -296,11 +301,151 @@ class GameScene(Scene):
                 return
             for idx, rect in self.card_rects:
                 if rect.collidepoint(event.pos):
-                    card = view.self_hand[idx]
-                    self._play_card_sound(card)
-                    self._spawn_card_effect(card)
+                    # Do not play sound/effects here. The engine may reject the card.
+                    # Feedback is triggered in update() after the public state/log confirms a play.
                     self.ctx.network.send(self.ctx.player_id, PlayCard(hand_index=idx))
                     return
+
+    # ------------------------------------------------------------------
+    # play feedback from confirmed state
+    # ------------------------------------------------------------------
+    def _sync_play_feedback(self, view) -> None:
+        """Trigger card-play animation/sound only after the public state confirms it."""
+        top = view.top_card
+        top_code = top.code() if top is not None else None
+        current_counts = {p.player_id: p.card_count for p in view.players}
+        log_snapshot = tuple(view.log or [])
+
+        # First view after entering the scene is just baseline state.
+        if self._last_log_snapshot is None:
+            self._last_log_snapshot = log_snapshot
+            self._last_player_card_counts = current_counts
+            self._last_turn_player_id = view.turn_player_id
+            self._last_top_card_code = top_code
+            return
+
+        play_name: str | None = None
+        play_code: str | None = None
+        new_lines = self._new_log_lines(self._last_log_snapshot, log_snapshot)
+        for line in reversed(new_lines):
+            parsed = self._parse_play_log(line)
+            if parsed is None:
+                continue
+            name, code = parsed
+            if top_code is None or code == top_code:
+                play_name = name
+                play_code = code
+                break
+
+        should_feedback = False
+        if play_code is not None and top is not None:
+            should_feedback = True
+        elif top_code != self._last_top_card_code:
+            # Fallback for a state refresh where the play log was truncated/missed.
+            should_feedback = self._last_top_card_code is not None and top is not None
+
+        if should_feedback and top is not None:
+            actor_id = self._player_id_from_name(view, play_name) if play_name else None
+            if actor_id is None:
+                actor_id = self._infer_play_actor_id(view, current_counts)
+            if play_name is None:
+                play_name = self._player_name_from_id(view, actor_id)
+            self._register_play_feedback(view, actor_id, play_name, top)
+
+        self._last_log_snapshot = log_snapshot
+        self._last_player_card_counts = current_counts
+        self._last_turn_player_id = view.turn_player_id
+        self._last_top_card_code = top_code
+
+    def _new_log_lines(self, old: tuple[str, ...], new: tuple[str, ...]) -> list[str]:
+        if old == new:
+            return []
+        max_overlap = min(len(old), len(new))
+        for overlap in range(max_overlap, 0, -1):
+            if old[-overlap:] == new[:overlap]:
+                return list(new[overlap:])
+        return list(new)
+
+    def _parse_play_log(self, line: str) -> tuple[str, str] | None:
+        marker = " played "
+        if marker not in line or not line.endswith("."):
+            return None
+        name, code = line[:-1].rsplit(marker, 1)
+        if not name or not code:
+            return None
+        return name, code
+
+    def _player_id_from_name(self, view, name: str | None) -> str | None:
+        if not name:
+            return None
+        for p in view.players:
+            if p.name == name:
+                return p.player_id
+        return None
+
+    def _player_name_from_id(self, view, player_id: str | None) -> str:
+        if player_id == self.ctx.player_id:
+            return "You"
+        for p in view.players:
+            if p.player_id == player_id:
+                return p.name
+        return "Player"
+
+    def _infer_play_actor_id(self, view, current_counts: dict[str, int]) -> str | None:
+        decreased: list[str] = []
+        for pid, count in current_counts.items():
+            prev = self._last_player_card_counts.get(pid)
+            if prev is not None and count < prev:
+                decreased.append(pid)
+        if len(decreased) == 1:
+            return decreased[0]
+        if self._last_turn_player_id in decreased:
+            return self._last_turn_player_id
+        return self._last_turn_player_id or view.turn_player_id
+
+    def _discard_center(self) -> tuple[int, int]:
+        cx, cy = SCREEN_W // 2, SCREEN_H // 2 - 6
+        return (cx + 42 + CARD_W // 2, cy)
+
+    def _player_card_source_pos(self, view, player_id: str | None) -> tuple[int, int]:
+        if player_id == self.ctx.player_id:
+            return (SCREEN_W // 2, SCREEN_H - CARD_H // 2 - 38)
+
+        others = [p for p in view.players if p.player_id != self.ctx.player_id]
+        slots: list[tuple[str, int, int]] = []
+        if len(others) == 1:
+            slots = [("top", SCREEN_W // 2, 122)]
+        elif len(others) == 2:
+            slots = [("left", 124, SCREEN_H // 2 - 38), ("right", SCREEN_W - 124, SCREEN_H // 2 - 38)]
+        elif len(others) >= 3:
+            slots = [
+                ("left", 124, SCREEN_H // 2 - 38),
+                ("top", SCREEN_W // 2, 122),
+                ("right", SCREEN_W - 124, SCREEN_H // 2 - 38),
+            ]
+        for (_where, cx, cy), opp in zip(slots, others):
+            if opp.player_id == player_id:
+                return (cx, cy + 38)
+        return (SCREEN_W // 2, 96)
+
+    def _register_play_feedback(self, view, player_id: str | None, player_name: str, card) -> None:
+        self._play_card_sound(card)
+        self._spawn_card_effect(card)
+        start = self._player_card_source_pos(view, player_id)
+        end = self._discard_center()
+        now = pygame.time.get_ticks()
+        display_name = "You" if player_id == self.ctx.player_id else player_name
+        self.play_animations.append({
+            "card": card,
+            "player_name": display_name,
+            "start": start,
+            "end": end,
+            "created": now,
+            "duration": 620,
+            "angle": -14 if start[0] < end[0] else 14,
+        })
+        # Keep only recent animations; several cards can be played in Asian mode.
+        self.play_animations = self.play_animations[-4:]
 
     # ------------------------------------------------------------------
     # rendering
@@ -315,13 +460,14 @@ class GameScene(Scene):
         self._draw_top_bar(screen, view)
         self._draw_opponents(screen, view)
         self._draw_center_piles(screen, view)
-        self._draw_effects(screen)
-        self._draw_log(screen, view)
-        self._draw_chat(screen)
         if self._deal_active:
             self._draw_deal_animation(screen, view)
         else:
             self._draw_hand(screen, view)
+        self._draw_play_animations(screen)
+        self._draw_effects(screen)
+        self._draw_log(screen, view)
+        self._draw_chat(screen)
         self._draw_buttons(screen, view)
 
         # Modals on top.
@@ -686,6 +832,46 @@ class GameScene(Scene):
             else:
                 back = self.ctx.assets.card_back((w, h))
                 screen.blit(back, rect)
+
+    def _draw_play_animations(self, screen: pygame.Surface) -> None:
+        if not self.play_animations:
+            return
+        now = pygame.time.get_ticks()
+        alive = []
+        for anim in self.play_animations:
+            age = now - anim["created"]
+            duration = anim["duration"]
+            if age > duration:
+                continue
+            t = max(0.0, min(1.0, age / duration))
+            ease = 1 - (1 - t) ** 3
+            sx, sy = anim["start"]
+            ex, ey = anim["end"]
+            cx = sx + (ex - sx) * ease
+            cy = sy + (ey - sy) * ease - math.sin(t * math.pi) * 72
+            scale = 1.12 - 0.12 * ease + 0.08 * math.sin(t * math.pi)
+            angle = anim["angle"] * (1 - ease)
+            alpha = 255
+            if t > 0.82:
+                alpha = int(255 * (1.0 - (t - 0.82) / 0.18))
+
+            base = self.ctx.assets.card_surface(anim["card"], (CARD_W, CARD_H))
+            card = pygame.transform.rotozoom(base, angle, scale)
+            card.set_alpha(max(0, min(255, alpha)))
+            rect = card.get_rect(center=(int(cx), int(cy)))
+            self._draw_card_shadow(screen, rect, alpha=min(120, max(30, alpha // 2)))
+            screen.blit(card, rect)
+
+            label = self.font_b.render(f"{anim['player_name']} played", True, TEXT)
+            label_bg = pygame.Surface((label.get_width() + 16, label.get_height() + 8), pygame.SRCALPHA)
+            label_bg.fill((8, 10, 18, min(210, alpha)))
+            label_bg.set_alpha(max(0, min(255, alpha)))
+            label_rect = label_bg.get_rect(center=(rect.centerx, rect.top - 14))
+            screen.blit(label_bg, label_rect)
+            label.set_alpha(max(0, min(255, alpha)))
+            screen.blit(label, label.get_rect(center=label_rect.center))
+            alive.append(anim)
+        self.play_animations = alive
 
     def _draw_buttons(self, screen: pygame.Surface, view) -> None:
         # ── DRAW button ─────────────────────────────────────────
